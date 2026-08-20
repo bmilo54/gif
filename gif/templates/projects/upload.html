@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+
+{% block title %}Upload image - GIF Generator{% endblock %}
+
+{% block content %}
+    <h1>Upload an image</h1>
+    <p class="subtitle">Pick a source image to detect objects and text in, then animate.</p>
+
+    <form class="card" method="post" enctype="multipart/form-data" novalidate>
+        {% csrf_token %}
+
+        {% if form.image.errors %}
+            <div class="errors">
+                {% for error in form.image.errors %}<div>{{ error }}</div>{% endfor %}
+            </div>
+        {% endif %}
+
+        <label class="dropzone" id="dropzone" for="{{ form.image.id_for_label }}">
+            <div class="dropzone-title">Drop an image here, or click to browse</div>
+            <div class="dropzone-hint">JPEG, PNG or WEBP &middot; up to 10 MB</div>
+            {{ form.image }}
+        </label>
+
+        <div class="preview" id="preview" hidden>
+            <img id="preview-image" alt="Selected image preview">
+        </div>
+
+        <div class="actions">
+            <button type="submit" class="btn">Upload and continue</button>
+        </div>
+    </form>
+
+    {% if recent_projects %}
+        <section class="recent">
+            <h2>Recent projects</h2>
+            <div class="recent-grid">
+                {% for project in recent_projects %}
+                    <a class="recent-item" href="{% url 'projects:project_detail' pk=project.pk %}">
+                        <img src="{{ project.image.url }}" alt="{{ project.project_id }}">
+                        <span>{{ project.project_id|default:"Unsaved" }}</span>
+                    </a>
+                {% endfor %}
+            </div>
+        </section>
+    {% endif %}
+{% endblock %}
+
+{% block scripts %}
+    <script>
+        (function () {
+            const dropzone = document.getElementById('dropzone');
+            const input = document.getElementById('{{ form.image.id_for_label }}');
+            const preview = document.getElementById('preview');
+            const previewImage = document.getElementById('preview-image');
+
+            function showPreview(file) {
+                if (!file || !file.type.startsWith('image/')) {
+                    return;
+                }
+                previewImage.src = URL.createObjectURL(file);
+                preview.hidden = false;
+            }
+
+            input.addEventListener('change', function () {
+                showPreview(input.files[0]);
+            });
+
+            ['dragenter', 'dragover'].forEach(function (name) {
+                dropzone.addEventListener(name, function (event) {
+                    event.preventDefault();
+                    dropzone.classList.add('is-dragging');
+                });
+            });
+
+            ['dragleave', 'drop'].forEach(function (name) {
+                dropzone.addEventListener(name, function (event) {
+                    event.preventDefault();
+                    dropzone.classList.remove('is-dragging');
+                });
+            });
+
+            dropzone.addEventListener('drop', function (event) {
+                const file = event.dataTransfer.files[0];
+                if (file) {
+                    input.files = event.dataTransfer.files;
+                    showPreview(file);
+                }
+            });
+        })();
+    </script>
+{% endblock %}

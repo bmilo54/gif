@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+
+{% block title %}{{ project.project_id }} - GIF Generator{% endblock %}
+
+{% block content %}
+    <h1>{{ project.project_id|default:"Project" }}</h1>
+    <p class="subtitle">Uploaded {{ project.created|date:"j M Y, g:i a" }}</p>
+
+    <div class="card">
+        {% if project.image %}
+            <div class="canvas-wrap">
+                <img id="source-image" src="{{ project.image.url }}" alt="{{ project.project_id }}">
+                <canvas id="overlay"></canvas>
+            </div>
+        {% else %}
+            <div class="empty-state">This project has no image.</div>
+        {% endif %}
+
+        <div class="meta-grid">
+            <div>
+                <div class="meta-label">Stored at</div>
+                <div class="meta-value">{{ project.image.name|default:"-" }}</div>
+            </div>
+            <div>
+                <div class="meta-label">Preprocessed size</div>
+                <div class="meta-value">
+                    {% if preprocessed_size %}{{ preprocessed_size.0 }} &times; {{ preprocessed_size.1 }}{% else %}-{% endif %}
+                </div>
+            </div>
+            <div>
+                <div class="meta-label">Detections</div>
+                <div class="meta-value">{{ detections|length }}</div>
+            </div>
+        </div>
+
+        {% if detections %}
+            <table class="detection-table">
+                <thead>
+                    <tr>
+                        <th>Label</th>
+                        <th>Source</th>
+                        <th>Confidence</th>
+                        <th>Box (x, y, w, h)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for detection in detections %}
+                        <tr>
+                            <td>{{ detection.label|default:"-" }}</td>
+                            <td><span class="tag tag-{{ detection.source }}">{{ detection.get_source_display }}</span></td>
+                            <td>{{ detection.confidence|floatformat:2 }}</td>
+                            <td>
+                                {{ detection.x|floatformat:3 }}, {{ detection.y|floatformat:3 }},
+                                {{ detection.width|floatformat:3 }}, {{ detection.height|floatformat:3 }}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+            <div class="empty-state">
+                No detections yet. Run detection to find objects and text in this image.
+            </div>
+        {% endif %}
+    </div>
+
+    <div class="actions">
+        {% if project.image %}
+            <form method="post" action="{% url 'projects:project_detect' pk=project.pk %}">
+                {% csrf_token %}
+                <button type="submit" class="btn">
+                    {% if detections %}Re-run detection{% else %}Run detection{% endif %}
+                </button>
+            </form>
+        {% endif %}
+        <a class="btn btn-secondary" href="{% url 'projects:project_detections_json' pk=project.pk %}">View JSON</a>
+        <a class="btn btn-secondary" href="{% url 'projects:project_upload' %}">Upload another</a>
+    </div>
+
+    {{ detections_data|json_script:"detections-data" }}
+{% endblock %}
+
+{% block scripts %}
+    <script>
+        (function () {
+            const image = document.getElementById('source-image');
+            const canvas = document.getElementById('overlay');
+            const dataNode = document.getElementById('detections-data');
+            if (!image || !canvas || !dataNode) {
+                return;
+            }
+
+            const detections = JSON.parse(dataNode.textContent);
+
+            // Bounding boxes are stored normalised (0-1), so they map onto the
+            // rendered image at whatever size the browser lays it out.
+            function draw() {
+                const width = image.clientWidth;
+                const height = image.clientHeight;
+                const ratio = window.devicePixelRatio || 1;
+
+                canvas.width = width * ratio;
+                canvas.height = height * ratio;
+
+                const ctx = canvas.getContext('2d');
+                ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+                ctx.clearRect(0, 0, width, height);
+
+                detections.forEach(function (item) {
+                    const x = item.x * width;
+                    const y = item.y * height;
+                    const w = item.width * width;
+                    const h = item.height * height;
+
+                    ctx.strokeStyle = item.source === 'ocr' ? '#f0b429' : '#4f8cff';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(x, y, w, h);
+
+                    const label = item.label + ' ' + Math.round(item.confidence * 100) + '%';
+                    ctx.font = '12px sans-serif';
+                    const textWidth = ctx.measureText(label).width;
+
+                    ctx.fillStyle = ctx.strokeStyle;
+                    ctx.fillRect(x, Math.max(0, y - 18), textWidth + 10, 18);
+                    ctx.fillStyle = '#0e1116';
+                    ctx.fillText(label, x + 5, Math.max(12, y - 5));
+                });
+            }
+
+            if (image.complete) {
+                draw();
+            } else {
+                image.addEventListener('load', draw);
+            }
+            window.addEventListener('resize', draw);
+        })();
+    </script>
+{% endblock %}
