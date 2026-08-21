@@ -269,8 +269,8 @@ PADDLEOCR_USE_TEXTLINE_ORIENTATION = False
 # GIF generation. Boxes are normalised, so downscaling the source here only
 # affects output file size, not the selected regions.
 GIF_MAX_SIDE = 720
-GIF_FRAME_COUNT = 24
-GIF_DURATION_MS = 60
+GIF_FRAME_COUNT = 32
+GIF_DURATION_MS = 50
 GIF_GLOW = 0.35
 GIF_SHINE_WIDTH = 0.18
 GIF_FEATHER = 10

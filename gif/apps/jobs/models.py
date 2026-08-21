@@ -18,6 +18,10 @@ def generate_gif_file(instance, filename):
     return f"Project/{project_id}/GIF/{version}/{filename}"
 
 
+def generate_video_file(instance, filename):
+    return generate_gif_file(instance, filename)
+
+
 class AnimationJob(TimeStampedModel):
     project = models.ForeignKey(Project, on_delete=models.CASCADE, verbose_name="Project", related_name="animations")
     selected_objects = models.ManyToManyField(DetectionObject, verbose_name="Detection Objects", related_name="animation_jobs")
@@ -39,6 +43,7 @@ class AnimationJob(TimeStampedModel):
     task_id = models.CharField(verbose_name="Task ID", max_length=255, blank=True, null=True)
 
     gif_file = models.FileField(verbose_name="GIF File", upload_to=generate_gif_file, blank=True, null=True)
+    video_file = models.FileField(verbose_name="Preview Video", upload_to=generate_video_file, blank=True, null=True)
 
     frame_count = models.PositiveIntegerField(verbose_name="Frame Count", blank=True, null=True)
     file_size = models.PositiveIntegerField(verbose_name="File Size", blank=True, null=True)
@@ -50,6 +55,11 @@ class AnimationJob(TimeStampedModel):
         if not self.gif_file:
             return ''
         return os.path.basename(self.gif_file.name)
+
+    def video_filename(self):
+        if not self.video_file:
+            return ''
+        return os.path.basename(self.video_file.name)
 
     def get_animation_types(self):
         values = [item for item in (self.animation_types or []) if item]

@@ -21,7 +21,7 @@
     let drag = null;
 
     const hints = {
-        select: 'Click a yellow or blue box to select it. Use Draw region for the character YOLO missed.',
+        select: 'Click a title, card, button, or text box. Draw a region for anything detection missed.',
         draw: 'Drag on the image to box the character or any region detection missed. Click a drawn box to remove it.',
     };
 
@@ -29,8 +29,14 @@
         if (isSelected) {
             return '#3fb950';
         }
-        if (source === 'ocr') {
+        if (source === 'ocr' || source === 'title') {
             return '#f0b429';
+        }
+        if (source === 'card') {
+            return '#3ecfcf';
+        }
+        if (source === 'button') {
+            return '#f778ba';
         }
         if (source === 'manual') {
             return '#bc8cff';
@@ -69,12 +75,16 @@
     }
 
     function draw() {
-        const width = image.clientWidth;
-        const height = image.clientHeight;
+        const rect = canvas.getBoundingClientRect();
+        const width = rect.width;
+        const height = rect.height;
+        if (!width || !height) {
+            return;
+        }
         const ratio = window.devicePixelRatio || 1;
 
-        canvas.width = width * ratio;
-        canvas.height = height * ratio;
+        canvas.width = Math.round(width * ratio);
+        canvas.height = Math.round(height * ratio);
 
         const ctx = canvas.getContext('2d');
         ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
@@ -108,14 +118,18 @@
     }
 
     function syncForm() {
-        idsInput.value = Array.from(selected).join(',');
-        regionsInput.value = JSON.stringify(manualRegions);
+        if (idsInput) {
+            idsInput.value = Array.from(selected).join(',');
+        }
+        if (regionsInput) {
+            regionsInput.value = JSON.stringify(manualRegions);
+        }
         const total = selected.size + manualRegions.length;
         if (countNode) {
             countNode.textContent = String(total);
         }
         if (submit) {
-            submit.disabled = total === 0;
+            submit.setAttribute('aria-disabled', total === 0 ? 'true' : 'false');
         }
 
         document.querySelectorAll('#detection-table tr[data-id]').forEach(function (row) {
@@ -262,25 +276,13 @@
     });
 
     if (form) {
-        form.addEventListener('submit', function (event) {
-            syncForm();
-            if (selected.size + manualRegions.length === 0) {
-                event.preventDefault();
-            }
-        });
+        form.addEventListener('submit', syncForm, true);
     }
 
-    if (image.complete) {
+    if (image.complete && image.naturalWidth) {
         draw();
-    } else {
-        image.addEventListener('load', draw);
     }
+    image.addEventListener('load', draw);
     window.addEventListener('resize', draw);
     syncForm();
 })();
-draw();
-    }
-image.addEventListener('load', draw);
-window.addEventListener('resize', draw);
-syncForm();
-}) ();

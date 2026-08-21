@@ -6,7 +6,7 @@
     <h1>Upload an image</h1>
     <p class="subtitle">Pick a source image to detect objects and text in, then animate.</p>
 
-    <form class="card" method="post" enctype="multipart/form-data" novalidate>
+    <form class="card" method="post" enctype="multipart/form-data" novalidate id="upload-form">
         {% csrf_token %}
 
         {% if form.image.errors %}

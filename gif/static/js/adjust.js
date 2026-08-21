@@ -6,7 +6,6 @@
     const regionsInput = document.getElementById('regions-input');
     const form = document.getElementById('adjust-form');
     const list = document.getElementById('region-list');
-    const hint = document.getElementById('adjust-hint');
 
     if (!image || !canvas || !dataNode) {
         return;
@@ -308,6 +307,12 @@
             if (remove) {
                 const index = Number(remove.getAttribute('data-index'));
                 if (regions.length <= 1) {
+                    if (typeof window.showAppDialog === 'function') {
+                        window.showAppDialog(
+                            'Cannot remove the last region',
+                            'Keep at least one region. The GIF needs a box to animate.'
+                        );
+                    }
                     return;
                 }
                 regions.splice(index, 1);
@@ -343,6 +348,11 @@
             if (regions.length > 1) {
                 regions.splice(selected, 1);
                 selected = Math.min(selected, regions.length - 1);
+            } else if (typeof window.showAppDialog === 'function') {
+                window.showAppDialog(
+                    'Cannot remove the last region',
+                    'Keep at least one region. The GIF needs a box to animate.'
+                );
             }
         } else {
             return;
@@ -352,16 +362,7 @@
     });
 
     if (form) {
-        form.addEventListener('submit', function (event) {
-            sync();
-            const checked = form.querySelectorAll('input[name="animation_types"]:checked');
-            if (!regions.length || !checked.length) {
-                event.preventDefault();
-                if (hint) {
-                    hint.textContent = 'Keep at least one region and one effect.';
-                }
-            }
-        });
+        form.addEventListener('submit', sync, true);
     }
 
     if (image.complete && image.naturalWidth) {

@@ -11,9 +11,13 @@
     </p>
 
     <div class="card">
-        {% if job.gif_file %}
+        {% if job.video_file or job.gif_file %}
             <div class="gif-preview">
-                <img src="{{ job.gif_file.url }}" alt="Animated GIF v{{ job.version }}">
+                {% if job.video_file %}
+                    <video src="{{ job.video_file.url }}" autoplay loop muted playsinline></video>
+                {% else %}
+                    <img src="{{ job.gif_file.url }}" alt="Animated GIF v{{ job.version }}">
+                {% endif %}
             </div>
         {% elif job.status == 'failed' %}
             <div class="empty-state">GIF generation failed. Adjust regions and generate again.</div>
@@ -40,10 +44,12 @@
                 <div class="meta-label">Frames</div>
                 <div class="meta-value">{{ job.frame_count|default:"-" }}</div>
             </div>
-            {% if job.gif_file %}
+            {% if job.video_file or job.gif_file %}
                 <div class="meta-path">
                     <div class="meta-label">Stored at</div>
-                    <div class="meta-value" title="{{ job.gif_file.name }}">{{ job.gif_filename }}</div>
+                    <div class="meta-value" title="{{ job.video_file.name|default:job.gif_file.name }}">
+                        {{ job.video_filename|default:job.gif_filename }}
+                    </div>
                 </div>
             {% endif %}
         </div>
@@ -79,10 +85,14 @@
                 {% if job.gif_file %}
                     <a class="btn" href="{{ job.gif_file.url }}" download>Download GIF</a>
                 {% endif %}
-                <a class="btn {% if job.gif_file %}btn-secondary{% endif %}" href="{% url 'jobs:job_adjust' pk=job.pk %}">
-                    {% if job.gif_file %}Adjust &amp; regenerate{% else %}Adjust regions &amp; effects{% endif %}
+                {% if job.video_file %}
+                    <a class="btn btn-secondary" href="{{ job.video_file.url }}" download>Download MP4</a>
+                {% endif %}
+                <a class="btn {% if job.gif_file or job.video_file %}btn-secondary{% endif %}" href="{% url 'jobs:job_adjust' pk=job.pk %}">
+                    {% if job.gif_file or job.video_file %}Adjust &amp; regenerate{% else %}Adjust regions &amp; effects{% endif %}
                 </a>
             </div>
+            <a class="btn btn-secondary" href="{% url 'projects:project_upload' %}">Back to home</a>
         </div>
     </div>
 {% endblock %}

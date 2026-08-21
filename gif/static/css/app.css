@@ -58,6 +58,12 @@ a:hover {
     margin-right: 6px;
 }
 
+.topnav {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
 .topnav a {
     color: var(--muted);
     font-size: 14px;
@@ -95,6 +101,7 @@ h1 {
     flex-wrap: wrap;
     gap: 12px;
     align-items: center;
+    justify-content: space-between;
 }
 
 .actions-primary {
@@ -151,11 +158,15 @@ h1 {
     margin-bottom: 20px;
 }
 
-.gif-preview img {
+.gif-preview img,
+.gif-preview video {
     max-width: 100%;
     height: auto;
     border-radius: var(--radius);
     border: 1px solid var(--border);
+    display: block;
+    margin: 0 auto;
+    background: #0d0d12;
 }
 
 .actions {
@@ -593,4 +604,48 @@ h1 {
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 8px 10px;
+}
+
+.dialog-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: rgba(8, 10, 14, 0.72);
+}
+
+.dialog-backdrop[hidden] {
+    display: none;
+}
+
+body.dialog-open {
+    overflow: hidden;
+}
+
+.dialog {
+    width: min(420px, 100%);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 22px 22px 18px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+}
+
+.dialog h2 {
+    margin: 0 0 8px;
+    font-size: 18px;
+}
+
+.dialog p {
+    margin: 0 0 18px;
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+.dialog .btn {
+    width: 100%;
 }

@@ -12,6 +12,7 @@
             <span class="brand-mark">GIF</span> Generator
         </a>
         <nav class="topnav">
+            <a href="{% url 'projects:project_upload' %}">Home</a>
             <a href="{% url 'admin:index' %}">Admin</a>
         </nav>
     </header>
@@ -26,6 +27,14 @@
         {% block content %}{% endblock %}
     </main>
 
+    <div class="dialog-backdrop" id="app-dialog" hidden>
+        <div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="app-dialog-title" aria-describedby="app-dialog-message">
+            <h2 id="app-dialog-title">Cannot continue</h2>
+            <p id="app-dialog-message"></p>
+            <button type="button" class="btn" id="app-dialog-ok">OK</button>
+        </div>
+    </div>
+    <script src="{% static 'js/dialog.js' %}"></script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

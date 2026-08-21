@@ -89,16 +89,19 @@
         {% endif %}
 
         <div class="card-footer">
-            {% if project.image %}
-                <button type="submit" form="detect-form" class="btn btn-secondary">
-                    {% if detections %}Re-run detection{% else %}Run detection{% endif %}
-                </button>
-            {% endif %}
-            {% if detections or project.image %}
-                <button type="submit" form="animate-form" class="btn" id="animate-submit" disabled>
-                    Next: adjust regions
-                </button>
-            {% endif %}
+            <div class="actions-primary">
+                {% if project.image %}
+                    <button type="submit" form="detect-form" class="btn btn-secondary">
+                        {% if detections %}Re-run detection{% else %}Run detection{% endif %}
+                    </button>
+                {% endif %}
+                {% if detections or project.image %}
+                    <button type="submit" form="animate-form" class="btn" id="animate-submit">
+                        Next: adjust regions
+                    </button>
+                {% endif %}
+            </div>
+            <a class="btn btn-secondary" href="{% url 'projects:project_upload' %}">Back to home</a>
         </div>
     </div>
 
