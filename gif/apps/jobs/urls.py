@@ -11,6 +11,7 @@ urlpatterns = [
         name='job_create',
     ),
     path(r'jobs/<int:pk>/', views.AnimationJobDetailView.as_view(), name='job_detail'),
+    path(r'jobs/<int:pk>/adjust/', views.AnimationJobAdjustView.as_view(), name='job_adjust'),
     path(
         r'jobs/<int:pk>/generate/',
         views.AnimationJobGenerateView.as_view(),

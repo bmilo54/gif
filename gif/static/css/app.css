@@ -84,6 +84,24 @@ h1 {
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 24px;
+    overflow: hidden;
+}
+
+.card-footer {
+    margin-top: 22px;
+    padding-top: 18px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+}
+
+.actions-primary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
 }
 
 .dropzone {
@@ -143,6 +161,7 @@ h1 {
 .actions {
     margin-top: 22px;
     display: flex;
+    flex-wrap: wrap;
     gap: 12px;
     align-items: center;
 }
@@ -187,7 +206,7 @@ h1 {
 
 .meta-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 16px;
     margin-top: 20px;
 }
@@ -203,6 +222,29 @@ h1 {
     font-size: 15px;
     font-weight: 600;
     margin-top: 2px;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.meta-path {
+    grid-column: 1 / -1;
+    min-width: 0;
+}
+
+.meta-path .meta-value {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+    .meta-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
 }
 
 .canvas-wrap {
@@ -228,6 +270,54 @@ h1 {
 
 .canvas-wrap.is-draw canvas {
     cursor: crosshair;
+}
+
+.canvas-wrap.is-adjust canvas {
+    cursor: default;
+}
+
+.region-list {
+    list-style: none;
+    padding: 0;
+    margin: 16px 0 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.region-list li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.region-list li.is-selected .region-pick {
+    border-color: #3fb950;
+}
+
+.region-pick {
+    flex: 1;
+    text-align: left;
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    cursor: pointer;
+}
+
+.region-remove {
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    cursor: pointer;
+}
+
+.region-remove:hover {
+    color: var(--danger);
+    border-color: var(--danger);
 }
 
 .selection-toolbar {
@@ -382,6 +472,21 @@ h1 {
     color: #f0b429;
 }
 
+.tag-card {
+    background: rgba(62, 207, 207, 0.16);
+    color: #3ecfcf;
+}
+
+.tag-button {
+    background: rgba(247, 120, 186, 0.16);
+    color: #f778ba;
+}
+
+.tag-title {
+    background: rgba(240, 180, 41, 0.16);
+    color: #f0b429;
+}
+
 .recent {
     margin-top: 36px;
 }
@@ -421,4 +526,71 @@ h1 {
     padding: 8px 10px;
     font-size: 12px;
     color: var(--muted);
+}
+
+.effect-picker {
+    margin: 28px 0 8px;
+}
+
+.effect-picker h2 {
+    font-size: 15px;
+    color: var(--muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    margin: 0 0 6px;
+}
+
+.effect-picker .hint {
+    margin-bottom: 12px;
+}
+
+.effect-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 8px;
+}
+
+.effect-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+}
+
+.effect-option:has(input:checked) {
+    border-color: var(--accent);
+    background: rgba(79, 140, 255, 0.12);
+}
+
+.effect-option input {
+    margin: 0;
+}
+
+.regen-form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+}
+
+.effect-select-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--muted);
+    font-size: 13px;
+}
+
+.effect-select-label select {
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
 }

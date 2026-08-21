@@ -243,10 +243,10 @@ LOGGING = {
 # ML stack installed. Switch to 'yolo' / 'paddle' once those are available.
 DETECTION_OBJECT_BACKEND = 'yolo'
 DETECTION_TEXT_BACKEND = 'paddle'
-DETECTION_MIN_CONFIDENCE = 0.25
+DETECTION_MIN_CONFIDENCE = 0.15
 DETECTION_IOU_THRESHOLD = 0.9
 
-YOLO_MODEL = os.path.join(BASE_DIR, 'ml_models', 'yolov8n.pt')
+YOLO_MODEL = os.path.join(BASE_DIR, 'ml_models', 'yolov8s.pt')
 PADDLEOCR_LANG = 'en'
 
 # paddlepaddle 3.3.1 on CPU crashes inside the oneDNN text-detection kernel
@@ -254,13 +254,25 @@ PADDLEOCR_LANG = 'en'
 # oneDNN avoids it at a small speed cost.
 PADDLEOCR_ENABLE_MKLDNN = False
 
+# PaddleOCR 3.x defaults to limit_type='min' and limit_side_len=64, which
+# shrinks a 1280px promo down to 64px before text detection. Boxes then
+# come back in the right neighbourhood but miss the glyphs. Detect at the
+# same size we preprocess to, and skip document unwarp/orientation so the
+# polygons stay in the input image's coordinate space.
+PADDLEOCR_DET_LIMIT_TYPE = 'max'
+PADDLEOCR_DET_LIMIT_SIDE_LEN = 1280
+PADDLEOCR_DET_UNCLIP_RATIO = 1.8
+PADDLEOCR_USE_DOC_ORIENTATION = False
+PADDLEOCR_USE_DOC_UNWARPING = False
+PADDLEOCR_USE_TEXTLINE_ORIENTATION = False
+
 # GIF generation. Boxes are normalised, so downscaling the source here only
 # affects output file size, not the selected regions.
 GIF_MAX_SIDE = 720
-GIF_FRAME_COUNT = 16
-GIF_DURATION_MS = 90
-GIF_GLOW = 0.28
-GIF_SHINE_WIDTH = 0.22
+GIF_FRAME_COUNT = 24
+GIF_DURATION_MS = 60
+GIF_GLOW = 0.35
+GIF_SHINE_WIDTH = 0.18
 GIF_FEATHER = 10
 
 DATA_UPLOAD_MAX_NUMBER_FIELDS = None

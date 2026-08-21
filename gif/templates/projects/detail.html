@@ -19,10 +19,6 @@
 
         <div class="meta-grid">
             <div>
-                <div class="meta-label">Stored at</div>
-                <div class="meta-value">{{ project.image.name|default:"-" }}</div>
-            </div>
-            <div>
                 <div class="meta-label">Preprocessed size</div>
                 <div class="meta-value">
                     {% if preprocessed_size %}{{ preprocessed_size.0 }} &times; {{ preprocessed_size.1 }}{% else %}-{% endif %}
@@ -36,6 +32,12 @@
                 <div class="meta-label">Selected</div>
                 <div class="meta-value" id="selected-count">0</div>
             </div>
+            {% if project.image %}
+                <div class="meta-path">
+                    <div class="meta-label">Stored at</div>
+                    <div class="meta-value" title="{{ project.image.name }}">{{ project.image.name }}</div>
+                </div>
+            {% endif %}
         </div>
 
         {% if project.image %}
@@ -44,7 +46,7 @@
                     <button type="button" class="btn btn-secondary is-active" data-mode="select" id="mode-select">Select boxes</button>
                     <button type="button" class="btn btn-secondary" data-mode="draw" id="mode-draw">Draw region</button>
                 </div>
-                <p class="hint" id="mode-hint">Click a yellow or blue box to select it. Use Draw region for the character YOLO missed.</p>
+                <p class="hint" id="mode-hint">Click a title, card, button, or text box. Draw a region for anything detection missed.</p>
             </div>
         {% endif %}
 
@@ -74,33 +76,31 @@
                 No detections yet. Run detection to find objects and text in this image.
             </div>
         {% endif %}
-    </div>
 
-    <form method="post" action="{% url 'jobs:job_create' pk=project.pk %}" id="animate-form">
-        {% csrf_token %}
-        <input type="hidden" name="detection_ids" id="detection-ids" value="">
-        <input type="hidden" name="manual_regions" id="manual-regions" value="[]">
-        <div class="actions">
+        <form method="post" action="{% url 'jobs:job_create' pk=project.pk %}" id="animate-form">
+            {% csrf_token %}
+            <input type="hidden" name="detection_ids" id="detection-ids" value="">
+            <input type="hidden" name="manual_regions" id="manual-regions" value="[]">
+        </form>
+        {% if project.image %}
+            <form id="detect-form" method="post" action="{% url 'projects:project_detect' pk=project.pk %}">
+                {% csrf_token %}
+            </form>
+        {% endif %}
+
+        <div class="card-footer">
             {% if project.image %}
                 <button type="submit" form="detect-form" class="btn btn-secondary">
                     {% if detections %}Re-run detection{% else %}Run detection{% endif %}
                 </button>
             {% endif %}
             {% if detections or project.image %}
-                <button type="submit" class="btn" id="animate-submit" disabled>
-                    Create animation job
+                <button type="submit" form="animate-form" class="btn" id="animate-submit" disabled>
+                    Next: adjust regions
                 </button>
             {% endif %}
-            <a class="btn btn-secondary" href="{% url 'projects:project_detections_json' pk=project.pk %}">View JSON</a>
-            <a class="btn btn-secondary" href="{% url 'projects:project_upload' %}">Upload another</a>
         </div>
-    </form>
-
-    {% if project.image %}
-        <form id="detect-form" method="post" action="{% url 'projects:project_detect' pk=project.pk %}">
-            {% csrf_token %}
-        </form>
-    {% endif %}
+    </div>
 
     {% if animation_jobs %}
         <section class="recent">
@@ -108,7 +108,11 @@
             <ul class="job-list">
                 {% for job in animation_jobs %}
                     <li>
-                        <a href="{% url 'jobs:job_detail' pk=job.pk %}">v{{ job.version }}</a>
+                        {% if job.gif_file %}
+                            <a href="{% url 'jobs:job_detail' pk=job.pk %}">v{{ job.version }}</a>
+                        {% else %}
+                            <a href="{% url 'jobs:job_adjust' pk=job.pk %}">v{{ job.version }}</a>
+                        {% endif %}
                         <span class="tag tag-{{ job.status }}">{{ job.get_status_display }}</span>
                     </li>
                 {% endfor %}

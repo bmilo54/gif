@@ -87,7 +87,10 @@ class YoloObjectDetector:
         width, height = image.size
         detections = []
 
-        for result in model.predict(image, verbose=False):
+        # Pass the configured confidence floor directly into YOLO so its own
+        # NMS stage uses the same threshold as the pipeline's merge step.
+        conf_threshold = settings.DETECTION_MIN_CONFIDENCE
+        for result in model.predict(image, verbose=False, conf=conf_threshold):
             names = result.names
             for box in result.boxes:
                 x1, y1, x2, y2 = (float(value) for value in box.xyxy[0].tolist())
@@ -121,7 +124,25 @@ class PaddleTextDetector:
                     "The 'paddle' detection backend requires paddleocr and paddlepaddle. "
                     "Install them or set DETECTION_TEXT_BACKEND = 'stub'."
                 ) from exc
-            self._engine = PaddleOCR(lang=self.lang, enable_mkldnn=self.enable_mkldnn)
+    def _load(self):
+        if self._engine is None:
+            try:
+                from paddleocr import PaddleOCR
+            except ImportError as exc:
+                raise ImproperlyConfigured(
+                    "The 'paddle' detection backend requires paddleocr and paddlepaddle. "
+                    "Install them or set DETECTION_TEXT_BACKEND = 'stub'."
+                ) from exc
+            self._engine = PaddleOCR(
+                lang=self.lang,
+                enable_mkldnn=self.enable_mkldnn,
+                use_doc_orientation_classify=settings.PADDLEOCR_USE_DOC_ORIENTATION,
+                use_doc_unwarping=settings.PADDLEOCR_USE_DOC_UNWARPING,
+                use_textline_orientation=settings.PADDLEOCR_USE_TEXTLINE_ORIENTATION,
+                text_det_limit_type=settings.PADDLEOCR_DET_LIMIT_TYPE,
+                text_det_limit_side_len=settings.PADDLEOCR_DET_LIMIT_SIDE_LEN,
+                text_det_unclip_ratio=settings.PADDLEOCR_DET_UNCLIP_RATIO,
+            )
         return self._engine
 
     def __call__(self, image):
@@ -133,10 +154,20 @@ class PaddleTextDetector:
 
         detections = []
         for polygon, text, score in self._iter_results(engine, array):
-            xs = [float(point[0]) for point in polygon]
-            ys = [float(point[1]) for point in polygon]
+            xs, ys = self._polygon_coords(polygon)
             x1, x2 = min(xs), max(xs)
             y1, y2 = min(ys), max(ys)
+
+            # Pad relative to the box (not the full image) so small button
+            # labels expand toward the pill chrome without blowing up titles.
+            box_w = max(x2 - x1, 1.0)
+            box_h = max(y2 - y1, 1.0)
+            pad_x = max(width * 0.004, box_w * 0.10)
+            pad_y = max(height * 0.004, box_h * 0.20)
+            x1 = max(0.0, x1 - pad_x)
+            y1 = max(0.0, y1 - pad_y)
+            x2 = min(float(width), x2 + pad_x)
+            y2 = min(float(height), y2 + pad_y)
 
             detections.append(Detection(
                 label=text,
@@ -152,6 +183,31 @@ class PaddleTextDetector:
         return detections
 
     @staticmethod
+    def _aabb_to_polygon(box):
+        x1, y1, x2, y2 = (float(value) for value in list(box)[:4])
+        return [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
+
+    @staticmethod
+    def _polygon_coords(polygon):
+        """
+        Return (xs, ys) float lists from a PaddleOCR polygon.
+
+        PaddleOCR 3.x may return a flat numpy array of length 2N (where N is
+        the number of corners, usually 4) or an (N, 2) array. Normalise to
+        (N, 2) before extracting coordinates so we never mis-index a flat
+        array as a list of (x, y) pairs.
+        """
+        import numpy as np
+
+        pts = np.asarray(polygon, dtype=float)
+        if pts.ndim == 1:
+            # flat [x0, y0, x1, y1, ...] → reshape to (N, 2)
+            pts = pts.reshape(-1, 2)
+        xs = pts[:, 0].tolist()
+        ys = pts[:, 1].tolist()
+        return xs, ys
+
+    @staticmethod
     def _iter_results(engine, array):
         """
         Yield (polygon, text, score) across PaddleOCR result shapes.
@@ -161,9 +217,18 @@ class PaddleTextDetector:
         """
         if hasattr(engine, 'predict'):
             for result in engine.predict(array):
-                polygons = result['dt_polys']
                 texts = result['rec_texts']
                 scores = result['rec_scores']
+                # rec_boxes are axis-aligned in the input image. Prefer them
+                # over dt_polys, which are the raw quadrilaterals and look
+                # skewed once we take min/max on stylized or slightly rotated text.
+                if result.get('rec_boxes') is not None:
+                    polygons = [
+                        PaddleTextDetector._aabb_to_polygon(box)
+                        for box in result['rec_boxes']
+                    ]
+                else:
+                    polygons = result['dt_polys']
                 yield from zip(polygons, texts, scores)
             return
 

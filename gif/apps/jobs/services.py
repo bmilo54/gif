@@ -6,6 +6,7 @@ from django.db import transaction
 from apps.projects.choices import SOURCE_MANUAL
 from apps.projects.models import DetectionObject
 
+from .choices import DEFAULT_ANIMATION_TYPES, ANIMATION_TYPE_CHOICES
 from .models import AnimationJob
 
 
@@ -16,7 +17,7 @@ def _clamp_region(region):
         width = float(region['width'])
         height = float(region['height'])
     except (KeyError, TypeError, ValueError) as exc:
-        raise ValidationError('Each drawn region needs x, y, width and height.') from exc
+        raise ValidationError('Each region needs x, y, width and height.') from exc
 
     x = min(max(x, 0.0), 1.0)
     y = min(max(y, 0.0), 1.0)
@@ -24,7 +25,7 @@ def _clamp_region(region):
     height = min(max(height, 0.0), 1.0 - y)
 
     if width < 0.01 or height < 0.01:
-        raise ValidationError('Drawn regions are too small. Drag a larger box.')
+        raise ValidationError('Regions are too small. Drag a larger box.')
 
     return {'x': x, 'y': y, 'width': width, 'height': height}
 
@@ -60,15 +61,76 @@ def parse_manual_regions(raw):
     return [_clamp_region(region) for region in payload]
 
 
-@transaction.atomic
-def create_animation_job(project, detection_ids, manual_regions):
-    """
-    Persist an AnimationJob for this project.
+def parse_animation_types(raw_list):
+    allowed = {value for value, _label in ANIMATION_TYPE_CHOICES}
+    if raw_list is None:
+        return list(DEFAULT_ANIMATION_TYPES)
 
-    Clicked detections must already belong to the project. Drawn regions are
-    stored as DetectionObject rows with source='manual' so later GIF frames
-    can treat them the same as YOLO/OCR boxes. Version is the next integer
-    for that project.
+    values = []
+    for item in raw_list:
+        if item is None or str(item).strip() == '':
+            continue
+        item = str(item).strip()
+        if item not in allowed:
+            raise ValidationError('Unknown animation type.')
+        if item not in values:
+            values.append(item)
+    return values or list(DEFAULT_ANIMATION_TYPES)
+
+
+def parse_regions(raw):
+    if not raw or not str(raw).strip():
+        raise ValidationError('Adjust at least one region.')
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValidationError('Adjusted regions could not be read.') from exc
+
+    if not isinstance(payload, list) or not payload:
+        raise ValidationError('Adjust at least one region.')
+
+    regions = []
+    for item in payload:
+        if not isinstance(item, dict):
+            raise ValidationError('Each region must be an object.')
+        box = _clamp_region(item)
+        regions.append({
+            'key': str(item.get('key') or '')[:64],
+            'label': str(item.get('label') or 'Region')[:255],
+            'source': str(item.get('source') or 'manual')[:32],
+            **box,
+        })
+    return regions
+
+
+def snapshot_regions(detections, manual_regions):
+    regions = []
+    for detection in detections:
+        regions.append({
+            'key': f'det-{detection.pk}',
+            'label': detection.label or detection.text_content or 'Region',
+            'source': detection.source or 'manual',
+            'x': detection.x,
+            'y': detection.y,
+            'width': detection.width,
+            'height': detection.height,
+        })
+    for index, region in enumerate(manual_regions):
+        regions.append({
+            'key': f'manual-{index}',
+            'label': 'Manual region',
+            'source': SOURCE_MANUAL,
+            **region,
+        })
+    return regions
+
+
+@transaction.atomic
+def create_animation_job(project, detection_ids, manual_regions, animation_types=None):
+    """
+    Persist a pending AnimationJob. GIF is generated after the user adjusts
+    boxes on the next page.
     """
     unique_ids = list(dict.fromkeys(detection_ids))
     detections = list(project.detections.filter(pk__in=unique_ids))
@@ -76,7 +138,7 @@ def create_animation_job(project, detection_ids, manual_regions):
         raise ValidationError('One or more selected detections do not belong to this project.')
 
     if not detections and not manual_regions:
-        raise ValidationError('Select at least one box, or draw a region around something YOLO missed.')
+        raise ValidationError('Select at least one box, or draw a region around something detection missed.')
 
     manual_objects = [
         DetectionObject(
@@ -106,6 +168,15 @@ def create_animation_job(project, detection_ids, manual_regions):
         project=project,
         version=(last_version or 0) + 1,
         status='pending',
+        animation_types=animation_types or list(DEFAULT_ANIMATION_TYPES),
+        regions=snapshot_regions(detections, []),
     )
     job.selected_objects.set(detections)
+    return job
+
+
+def save_job_adjustments(job, regions, animation_types):
+    job.regions = regions
+    job.animation_types = animation_types
+    job.save(update_fields=['regions', 'animation_types'])
     return job

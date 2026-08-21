@@ -278,3 +278,9 @@
     window.addEventListener('resize', draw);
     syncForm();
 })();
+draw();
+    }
+image.addEventListener('load', draw);
+window.addEventListener('resize', draw);
+syncForm();
+}) ();

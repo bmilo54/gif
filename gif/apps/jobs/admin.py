@@ -3,4 +3,4 @@ from .models import AnimationJob
 
 @admin.register(AnimationJob)
 class AnimationJobAdmin(admin.ModelAdmin):
-    list_display = ["project__project_id", "version", "status"]
+    list_display = ["project__project_id", "version", "animation_types", "status"]

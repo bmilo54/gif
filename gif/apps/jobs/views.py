@@ -12,8 +12,16 @@ from django.views.generic.detail import SingleObjectMixin
 from apps.projects.models import Project
 
 from .generation import generate_gif
+from .choices import ANIMATION_TYPE_CHOICES
 from .models import AnimationJob
-from .services import create_animation_job, parse_detection_ids, parse_manual_regions
+from .services import (
+    create_animation_job,
+    parse_animation_types,
+    parse_detection_ids,
+    parse_manual_regions,
+    parse_regions,
+    save_job_adjustments,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,20 +37,13 @@ class AnimationJobCreateView(SingleObjectMixin, View):
         try:
             detection_ids = parse_detection_ids(request.POST.get('detection_ids', ''))
             manual_regions = parse_manual_regions(request.POST.get('manual_regions', ''))
-            job = create_animation_job(project, detection_ids, manual_regions)
+            animation_types = parse_animation_types(request.POST.getlist('animation_types'))
+            job = create_animation_job(project, detection_ids, manual_regions, animation_types)
         except ValidationError as exc:
             messages.error(request, ' '.join(exc.messages))
             return redirect('projects:project_detail', pk=project.pk)
 
-        try:
-            generate_gif(job)
-        except Exception:
-            logger.exception("GIF generation failed for job %s", job.pk)
-            messages.error(request, "Job saved, but GIF generation failed. You can retry from the job page.")
-        else:
-            messages.success(request, f"Animation job v{job.version} is ready.")
-
-        return redirect('jobs:job_detail', pk=job.pk)
+        return redirect('jobs:job_adjust', pk=job.pk)
 
 
 class AnimationJobDetailView(DetailView):
@@ -57,6 +58,27 @@ class AnimationJobDetailView(DetailView):
             .prefetch_related('selected_objects')
         )
 
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context['job_regions'] = self.object.get_regions()
+        return context
+
+
+class AnimationJobAdjustView(DetailView):
+    model = AnimationJob
+    template_name = 'jobs/adjust.html'
+    context_object_name = 'job'
+
+    def get_queryset(self):
+        return AnimationJob.objects.select_related('project')
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context['animation_types'] = ANIMATION_TYPE_CHOICES
+        context['selected_effects'] = set(self.object.get_animation_types())
+        context['regions_data'] = self.object.get_regions()
+        return context
+
 
 @method_decorator(transaction.non_atomic_requests, name='dispatch')
 class AnimationJobGenerateView(SingleObjectMixin, View):
@@ -66,10 +88,17 @@ class AnimationJobGenerateView(SingleObjectMixin, View):
     def post(self, request, *args, **kwargs):
         job = self.get_object()
         try:
+            regions = parse_regions(request.POST.get('regions', '')) if request.POST.get('regions') else job.get_regions()
+            animation_types = parse_animation_types(request.POST.getlist('animation_types'))
+            save_job_adjustments(job, regions, animation_types)
             generate_gif(job)
+        except ValidationError as exc:
+            messages.error(request, ' '.join(exc.messages))
+            return redirect('jobs:job_adjust', pk=job.pk)
         except Exception:
             logger.exception("GIF generation failed for job %s", job.pk)
             messages.error(request, "GIF generation failed. Check the logs for details.")
-        else:
-            messages.success(request, f"GIF for v{job.version} is ready.")
+            return redirect('jobs:job_adjust', pk=job.pk)
+
+        messages.success(request, f"GIF for v{job.version} is ready.")
         return redirect('jobs:job_detail', pk=job.pk)

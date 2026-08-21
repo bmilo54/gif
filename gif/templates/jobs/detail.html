@@ -4,7 +4,11 @@
 
 {% block content %}
     <h1>{{ job.project.project_id }} &middot; v{{ job.version }}</h1>
-    <p class="subtitle">Created {{ job.created|date:"j M Y, g:i a" }}</p>
+    <p class="subtitle">
+        Created {{ job.created|date:"j M Y, g:i a" }}
+        &middot;
+        <a href="{% url 'projects:project_detail' pk=job.project.pk %}">Back to project</a>
+    </p>
 
     <div class="card">
         {% if job.gif_file %}
@@ -12,11 +16,11 @@
                 <img src="{{ job.gif_file.url }}" alt="Animated GIF v{{ job.version }}">
             </div>
         {% elif job.status == 'failed' %}
-            <div class="empty-state">GIF generation failed. Retry to try again.</div>
+            <div class="empty-state">GIF generation failed. Adjust regions and generate again.</div>
         {% elif job.status == 'processing' %}
             <div class="empty-state">Generating GIF&hellip;</div>
         {% else %}
-            <div class="empty-state">No GIF yet. Generate one from the selected regions.</div>
+            <div class="empty-state">No GIF yet. Adjust the boxes, pick effects, then generate.</div>
         {% endif %}
 
         <div class="meta-grid">
@@ -25,17 +29,23 @@
                 <div class="meta-value"><span class="tag tag-{{ job.status }}">{{ job.get_status_display }}</span></div>
             </div>
             <div>
+                <div class="meta-label">Effects</div>
+                <div class="meta-value">{{ job.get_animation_type_labels|join:", " }}</div>
+            </div>
+            <div>
                 <div class="meta-label">Regions</div>
-                <div class="meta-value">{{ job.selected_objects.count }}</div>
+                <div class="meta-value">{{ job_regions|length }}</div>
             </div>
             <div>
                 <div class="meta-label">Frames</div>
                 <div class="meta-value">{{ job.frame_count|default:"-" }}</div>
             </div>
-            <div>
-                <div class="meta-label">Stored at</div>
-                <div class="meta-value">{{ job.gif_file.name|default:"-" }}</div>
-            </div>
+            {% if job.gif_file %}
+                <div class="meta-path">
+                    <div class="meta-label">Stored at</div>
+                    <div class="meta-value" title="{{ job.gif_file.name }}">{{ job.gif_filename }}</div>
+                </div>
+            {% endif %}
         </div>
 
         <table class="detection-table">
@@ -47,10 +57,10 @@
                 </tr>
             </thead>
             <tbody>
-                {% for detection in job.selected_objects.all %}
+                {% for detection in job_regions %}
                     <tr>
                         <td>{{ detection.label|default:"-" }}</td>
-                        <td><span class="tag tag-{{ detection.source }}">{{ detection.get_source_display }}</span></td>
+                        <td><span class="tag tag-{{ detection.source }}">{{ detection.source }}</span></td>
                         <td>
                             {{ detection.x|floatformat:3 }}, {{ detection.y|floatformat:3 }},
                             {{ detection.width|floatformat:3 }}, {{ detection.height|floatformat:3 }}
@@ -63,19 +73,16 @@
                 {% endfor %}
             </tbody>
         </table>
-    </div>
 
-    <div class="actions">
-        {% if job.gif_file %}
-            <a class="btn" href="{{ job.gif_file.url }}" download>Download GIF</a>
-        {% endif %}
-        <form method="post" action="{% url 'jobs:job_generate' pk=job.pk %}">
-            {% csrf_token %}
-            <button type="submit" class="btn {% if job.gif_file %}btn-secondary{% endif %}">
-                {% if job.gif_file %}Regenerate GIF{% else %}Generate GIF{% endif %}
-            </button>
-        </form>
-        <a class="btn btn-secondary" href="{% url 'projects:project_detail' pk=job.project.pk %}">Not satisfied? Select again</a>
-        <a class="btn btn-secondary" href="{% url 'projects:project_upload' %}">Upload another</a>
+        <div class="card-footer">
+            <div class="actions-primary">
+                {% if job.gif_file %}
+                    <a class="btn" href="{{ job.gif_file.url }}" download>Download GIF</a>
+                {% endif %}
+                <a class="btn {% if job.gif_file %}btn-secondary{% endif %}" href="{% url 'jobs:job_adjust' pk=job.pk %}">
+                    {% if job.gif_file %}Adjust &amp; regenerate{% else %}Adjust regions &amp; effects{% endif %}
+                </a>
+            </div>
+        </div>
     </div>
 {% endblock %}

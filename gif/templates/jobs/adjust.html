@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}Adjust regions - {{ job.project.project_id }}{% endblock %}
+
+{% block content %}
+    <h1>{{ job.project.project_id }} &middot; v{{ job.version }}</h1>
+    <p class="subtitle">Drag a box to move it. Drag a corner or edge to resize so the effect stays on the card or button.</p>
+
+    <form method="post" action="{% url 'jobs:job_generate' pk=job.pk %}" id="adjust-form" class="card">
+        {% csrf_token %}
+        <input type="hidden" name="regions" id="regions-input" value="">
+
+        {% if job.project.image %}
+            <div class="canvas-wrap is-adjust" id="canvas-wrap">
+                <img id="source-image" src="{{ job.project.image.url }}" alt="{{ job.project.project_id }}">
+                <canvas id="overlay"></canvas>
+            </div>
+        {% else %}
+            <div class="empty-state">This project has no image.</div>
+        {% endif %}
+
+        <p class="hint" id="adjust-hint" style="margin-top: 14px;">Click a region to select it. Arrow keys nudge. Delete removes it.</p>
+
+        <ul class="region-list" id="region-list"></ul>
+
+        <section class="effect-picker">
+            <h2>Animation effects</h2>
+            <p class="hint">Pick one or more. They stack on the same boxes (zoom + shine, fade + sparkle, and so on).</p>
+            <div class="effect-grid">
+                {% for value, label in animation_types %}
+                    <label class="effect-option">
+                        <input type="checkbox" name="animation_types" value="{{ value }}"{% if value in selected_effects %} checked{% endif %}>
+                        <span>{{ label }}</span>
+                    </label>
+                {% endfor %}
+            </div>
+        </section>
+
+        <div class="card-footer">
+            <div class="actions-primary">
+                <button type="submit" class="btn" id="generate-submit">Generate GIF</button>
+                <a class="btn btn-secondary" href="{% url 'projects:project_detail' pk=job.project.pk %}">Back to selection</a>
+            </div>
+        </div>
+    </form>
+
+    {{ regions_data|json_script:"regions-data" }}
+{% endblock %}
+
+{% block scripts %}
+    <script src="{% static 'js/adjust.js' %}"></script>
+{% endblock %}

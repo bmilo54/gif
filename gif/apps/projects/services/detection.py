@@ -3,8 +3,17 @@ import logging
 from django.conf import settings
 from django.db import transaction
 
+from ..choices import (
+    SOURCE_BUTTON,
+    SOURCE_CARD,
+    SOURCE_MANUAL,
+    SOURCE_OCR,
+    SOURCE_TITLE,
+    SOURCE_YOLO,
+)
 from ..models import DetectionObject
 from .detectors import get_object_detector, get_text_detector
+from .layout import group_ui_regions
 from .preprocessing import load_preprocessed_image
 
 logger = logging.getLogger(__name__)
@@ -47,21 +56,39 @@ def merge_detections(detections, min_confidence=None, iou_threshold=None):
     merged = []
     for candidate in candidates:
         duplicate = any(
-            kept.label == candidate.label
+            kept.source == candidate.source
+            and kept.label == candidate.label
             and _intersection_over_union(kept, candidate) >= iou_threshold
             for kept in merged
         )
         if not duplicate:
             merged.append(candidate)
 
-    return merged
+    # Stock YOLO (COCO) often tags UI chrome as random objects. Those blue
+    # boxes sit on top of the real OCR hits and make the overlay look like
+    # PaddleOCR is duplicated or shifted. Keep the text box; drop the YOLO
+    # box when they overlap.
+    text_like = [
+        item for item in merged
+        if item.source in (SOURCE_OCR, SOURCE_CARD, SOURCE_BUTTON, SOURCE_TITLE)
+    ]
+    others = []
+    for item in merged:
+        if item.source == SOURCE_YOLO and any(
+            _intersection_over_union(item, text) >= 0.15 for text in text_like
+        ):
+            continue
+        others.append(item)
+    return others
 
 
 def detect(image):
-    """Run both engines over a preprocessed image and merge the results."""
+    """Run YOLO and OCR, and also group OCR words into title/card/button regions."""
     detections = []
     detections.extend(get_object_detector()(image))
-    detections.extend(get_text_detector()(image))
+    ocr = get_text_detector()(image)
+    detections.extend(ocr)
+    detections.extend(group_ui_regions(ocr))
     return merge_detections(detections)
 
 
@@ -79,7 +106,9 @@ def run_detection(project):
     image = load_preprocessed_image(project.image)
     detections = detect(image)
 
-    project.detections.all().delete()
+    # Drop previous auto detections so Re-run does not stack a second copy.
+    # Manual regions the user drew are kept.
+    project.detections.exclude(source=SOURCE_MANUAL).delete()
     created = DetectionObject.objects.bulk_create([
         DetectionObject(
             project=project,
