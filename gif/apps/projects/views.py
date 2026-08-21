@@ -62,6 +62,7 @@ class ProjectDetailView(DetailView):
         context['detections'] = detections
         context['detections_data'] = [serialize_detection(d) for d in detections]
         context['preprocessed_size'] = preprocessed_size
+        context['animation_jobs'] = project.animations.all()[:8]
         return context
 
 

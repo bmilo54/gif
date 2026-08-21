@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load static %}
 
 {% block title %}{{ project.project_id }} - GIF Generator{% endblock %}
 
@@ -8,7 +9,7 @@
 
     <div class="card">
         {% if project.image %}
-            <div class="canvas-wrap">
+            <div class="canvas-wrap" id="canvas-wrap">
                 <img id="source-image" src="{{ project.image.url }}" alt="{{ project.project_id }}">
                 <canvas id="overlay"></canvas>
             </div>
@@ -31,28 +32,39 @@
                 <div class="meta-label">Detections</div>
                 <div class="meta-value">{{ detections|length }}</div>
             </div>
+            <div>
+                <div class="meta-label">Selected</div>
+                <div class="meta-value" id="selected-count">0</div>
+            </div>
         </div>
 
+        {% if project.image %}
+            <div class="selection-toolbar">
+                <div class="mode-toggle" role="group" aria-label="Selection mode">
+                    <button type="button" class="btn btn-secondary is-active" data-mode="select" id="mode-select">Select boxes</button>
+                    <button type="button" class="btn btn-secondary" data-mode="draw" id="mode-draw">Draw region</button>
+                </div>
+                <p class="hint" id="mode-hint">Click a yellow or blue box to select it. Use Draw region for the character YOLO missed.</p>
+            </div>
+        {% endif %}
+
         {% if detections %}
-            <table class="detection-table">
+            <table class="detection-table" id="detection-table">
                 <thead>
                     <tr>
+                        <th></th>
                         <th>Label</th>
                         <th>Source</th>
                         <th>Confidence</th>
-                        <th>Box (x, y, w, h)</th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for detection in detections %}
-                        <tr>
+                        <tr data-id="{{ detection.pk }}">
+                            <td><input type="checkbox" class="row-check" data-id="{{ detection.pk }}"></td>
                             <td>{{ detection.label|default:"-" }}</td>
                             <td><span class="tag tag-{{ detection.source }}">{{ detection.get_source_display }}</span></td>
                             <td>{{ detection.confidence|floatformat:2 }}</td>
-                            <td>
-                                {{ detection.x|floatformat:3 }}, {{ detection.y|floatformat:3 }},
-                                {{ detection.width|floatformat:3 }}, {{ detection.height|floatformat:3 }}
-                            </td>
                         </tr>
                     {% endfor %}
                 </tbody>
@@ -64,75 +76,49 @@
         {% endif %}
     </div>
 
-    <div class="actions">
-        {% if project.image %}
-            <form method="post" action="{% url 'projects:project_detect' pk=project.pk %}">
-                {% csrf_token %}
-                <button type="submit" class="btn">
+    <form method="post" action="{% url 'jobs:job_create' pk=project.pk %}" id="animate-form">
+        {% csrf_token %}
+        <input type="hidden" name="detection_ids" id="detection-ids" value="">
+        <input type="hidden" name="manual_regions" id="manual-regions" value="[]">
+        <div class="actions">
+            {% if project.image %}
+                <button type="submit" form="detect-form" class="btn btn-secondary">
                     {% if detections %}Re-run detection{% else %}Run detection{% endif %}
                 </button>
-            </form>
-        {% endif %}
-        <a class="btn btn-secondary" href="{% url 'projects:project_detections_json' pk=project.pk %}">View JSON</a>
-        <a class="btn btn-secondary" href="{% url 'projects:project_upload' %}">Upload another</a>
-    </div>
+            {% endif %}
+            {% if detections or project.image %}
+                <button type="submit" class="btn" id="animate-submit" disabled>
+                    Create animation job
+                </button>
+            {% endif %}
+            <a class="btn btn-secondary" href="{% url 'projects:project_detections_json' pk=project.pk %}">View JSON</a>
+            <a class="btn btn-secondary" href="{% url 'projects:project_upload' %}">Upload another</a>
+        </div>
+    </form>
+
+    {% if project.image %}
+        <form id="detect-form" method="post" action="{% url 'projects:project_detect' pk=project.pk %}">
+            {% csrf_token %}
+        </form>
+    {% endif %}
+
+    {% if animation_jobs %}
+        <section class="recent">
+            <h2>Animation jobs</h2>
+            <ul class="job-list">
+                {% for job in animation_jobs %}
+                    <li>
+                        <a href="{% url 'jobs:job_detail' pk=job.pk %}">v{{ job.version }}</a>
+                        <span class="tag tag-{{ job.status }}">{{ job.get_status_display }}</span>
+                    </li>
+                {% endfor %}
+            </ul>
+        </section>
+    {% endif %}
 
     {{ detections_data|json_script:"detections-data" }}
 {% endblock %}
 
 {% block scripts %}
-    <script>
-        (function () {
-            const image = document.getElementById('source-image');
-            const canvas = document.getElementById('overlay');
-            const dataNode = document.getElementById('detections-data');
-            if (!image || !canvas || !dataNode) {
-                return;
-            }
-
-            const detections = JSON.parse(dataNode.textContent);
-
-            // Bounding boxes are stored normalised (0-1), so they map onto the
-            // rendered image at whatever size the browser lays it out.
-            function draw() {
-                const width = image.clientWidth;
-                const height = image.clientHeight;
-                const ratio = window.devicePixelRatio || 1;
-
-                canvas.width = width * ratio;
-                canvas.height = height * ratio;
-
-                const ctx = canvas.getContext('2d');
-                ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-                ctx.clearRect(0, 0, width, height);
-
-                detections.forEach(function (item) {
-                    const x = item.x * width;
-                    const y = item.y * height;
-                    const w = item.width * width;
-                    const h = item.height * height;
-
-                    ctx.strokeStyle = item.source === 'ocr' ? '#f0b429' : '#4f8cff';
-                    ctx.lineWidth = 2;
-                    ctx.strokeRect(x, y, w, h);
-
-                    const label = item.label + ' ' + Math.round(item.confidence * 100) + '%';
-                    ctx.font = '12px sans-serif';
-                    const textWidth = ctx.measureText(label).width;
-
-                    ctx.fillStyle = ctx.strokeStyle;
-                    ctx.fillRect(x, Math.max(0, y - 18), textWidth + 10, 18);
-                    ctx.fillStyle = '#0e1116';
-                    ctx.fillText(label, x + 5, Math.max(12, y - 5));
-                });
-            }
-
-            if (image.complete) {
-                draw();
-            } else {
-                image.addEventListener('load', draw);
-            }
-            window.addEventListener('resize', draw);
-        })();
-    </script>
+    <script src="{% static 'js/selection.js' %}"></script>
 {% endblock %}

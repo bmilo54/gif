@@ -1,6 +1,6 @@
 from django.contrib import admin
 from .models import Project, DetectionObject
-from django.utils.html import format_html
+
 
 @admin.register(Project)
 class ProjectAdmin(admin.ModelAdmin):
@@ -11,8 +11,9 @@ class ProjectAdmin(admin.ModelAdmin):
     def image_thumbnail(self, obj):
         thumb = obj.get_image_thumbnail()
         if thumb:
-            return format_html(thumb)
+            return thumb
         return "-"
+
 
 @admin.register(DetectionObject)
 class DetectionObjectAdmin(admin.ModelAdmin):

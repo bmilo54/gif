@@ -128,6 +128,18 @@ h1 {
     border: 1px solid var(--border);
 }
 
+.gif-preview {
+    text-align: center;
+    margin-bottom: 20px;
+}
+
+.gif-preview img {
+    max-width: 100%;
+    height: auto;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+}
+
 .actions {
     margin-top: 22px;
     display: flex;
@@ -211,6 +223,86 @@ h1 {
     inset: 0;
     width: 100%;
     height: 100%;
+    cursor: pointer;
+}
+
+.canvas-wrap.is-draw canvas {
+    cursor: crosshair;
+}
+
+.selection-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 18px;
+    align-items: center;
+    margin-top: 22px;
+}
+
+.mode-toggle {
+    display: flex;
+    gap: 8px;
+}
+
+.mode-toggle .btn.is-active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
+.hint {
+    color: var(--muted);
+    font-size: 13px;
+    margin: 0;
+    flex: 1;
+    min-width: 220px;
+}
+
+.detection-table tr[data-id] {
+    cursor: pointer;
+}
+
+.detection-table tr.is-selected td {
+    background: rgba(63, 185, 80, 0.1);
+}
+
+.job-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 16px;
+}
+
+.job-list li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.tag-manual {
+    background: rgba(188, 140, 255, 0.16);
+    color: #bc8cff;
+}
+
+.tag-pending {
+    background: rgba(240, 180, 41, 0.16);
+    color: #f0b429;
+}
+
+.tag-processing {
+    background: rgba(79, 140, 255, 0.16);
+    color: #8ab4ff;
+}
+
+.tag-completed {
+    background: rgba(63, 185, 80, 0.16);
+    color: #7ee787;
+}
+
+.tag-failed {
+    background: rgba(248, 81, 73, 0.16);
+    color: #ffb3ae;
 }
 
 .empty-state {
