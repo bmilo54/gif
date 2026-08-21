@@ -7,6 +7,7 @@ annotated-types==0.8.0
 anyio==4.14.2
 asgiref==3.12.1
 attrs==26.1.0
+av==18.1.0
 awscli==1.46.0
 bce-python-sdk==0.9.76
 beautifulsoup4==4.15.0
@@ -42,6 +43,8 @@ httpcore==1.0.9
 httpx==0.28.1
 huggingface_hub==1.28.0
 idna==3.19
+imageio==2.37.4
+imageio-ffmpeg==0.6.0
 imagesize==2.0.0
 jaraco.classes==3.4.0
 jaraco.context==6.1.2
