@@ -304,7 +304,6 @@ REMOTION_DIR = os.path.join(os.path.dirname(BASE_DIR), 'remotion')
 
 # Fal.ai LivePortrait: https://fal.ai/dashboard/keys
 # Paste your Fal API key here. Leave empty to skip the person layer.
-FAL_KEY = ''
 FAL_DRIVING_VIDEO = (
     'https://storage.googleapis.com/falserverless/model_tests/'
     'live-portrait/liveportrait-example.mp4'
