@@ -247,6 +247,28 @@ DETECTION_MIN_CONFIDENCE = 0.15
 DETECTION_IOU_THRESHOLD = 0.9
 
 YOLO_MODEL = os.path.join(BASE_DIR, 'ml_models', 'yolov8s.pt')
+
+# Person silhouette: SAM 2.1 box prompt (CPU-friendly tiny weights).
+# Open-vocab props (dragon, gift, coins): SAM 3 if SAM3_ENABLED, else YOLO-World.
+SAM_ENABLED = True
+SAM_MODEL = os.path.join(BASE_DIR, 'ml_models', 'sam2.1_t.pt')
+SAM3_ENABLED = False
+SAM3_MODEL = os.path.join(BASE_DIR, 'ml_models', 'sam3.pt')
+SAM_CONCEPT_FALLBACK = True
+YOLOWORLD_MODEL = os.path.join(BASE_DIR, 'ml_models', 'yolov8s-worldv2.pt')
+SAM_MIN_CONFIDENCE = 0.25
+SAM_PROP_CONCEPTS = [
+    'dragon',
+    'golden dragon',
+    'gift box',
+    'red gift',
+    'gold coins',
+    'coin stack',
+    'capsule',
+    'pill',
+    'roulette wheel',
+    'poker chip',
+]
 PADDLEOCR_LANG = 'en'
 
 # paddlepaddle 3.3.1 on CPU crashes inside the oneDNN text-detection kernel
@@ -274,6 +296,19 @@ GIF_DURATION_MS = 50
 GIF_GLOW = 0.35
 GIF_SHINE_WIDTH = 0.18
 GIF_FEATHER = 10
+
+# Remotion renders the still poster plus Lottie UI overlays.
+# Fal LivePortrait animates a cropped person box on top of that poster.
+ANIMATION_RENDERER = 'remotion'
+REMOTION_DIR = os.path.join(os.path.dirname(BASE_DIR), 'remotion')
+
+# Fal.ai LivePortrait: https://fal.ai/dashboard/keys
+# Paste your Fal API key here. Leave empty to skip the person layer.
+FAL_KEY = ''
+FAL_DRIVING_VIDEO = (
+    'https://storage.googleapis.com/falserverless/model_tests/'
+    'live-portrait/liveportrait-example.mp4'
+)
 
 DATA_UPLOAD_MAX_NUMBER_FIELDS = None
 DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024 # 10MB

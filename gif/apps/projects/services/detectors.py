@@ -90,7 +90,7 @@ class YoloObjectDetector:
         # Pass the configured confidence floor directly into YOLO so its own
         # NMS stage uses the same threshold as the pipeline's merge step.
         conf_threshold = settings.DETECTION_MIN_CONFIDENCE
-        for result in model.predict(image, verbose=False, conf=conf_threshold):
+        for result in model.predict(image, verbose=False, conf=conf_threshold, classes=[0]):
             names = result.names
             for box in result.boxes:
                 x1, y1, x2, y2 = (float(value) for value in box.xyxy[0].tolist())
@@ -115,15 +115,6 @@ class PaddleTextDetector:
         self.enable_mkldnn = enable_mkldnn
         self._engine = None
 
-    def _load(self):
-        if self._engine is None:
-            try:
-                from paddleocr import PaddleOCR
-            except ImportError as exc:
-                raise ImproperlyConfigured(
-                    "The 'paddle' detection backend requires paddleocr and paddlepaddle. "
-                    "Install them or set DETECTION_TEXT_BACKEND = 'stub'."
-                ) from exc
     def _load(self):
         if self._engine is None:
             try:

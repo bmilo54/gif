@@ -21,7 +21,7 @@
     let drag = null;
 
     const hints = {
-        select: 'Click a title, card, button, or text box. Draw a region for anything detection missed.',
+        select: 'Click a title, card, button, prop, or text box. Draw a region for anything detection missed.',
         draw: 'Drag on the image to box the character or any region detection missed. Click a drawn box to remove it.',
     };
 
@@ -37,6 +37,9 @@
         }
         if (source === 'button') {
             return '#f778ba';
+        }
+        if (source === 'prop') {
+            return '#ff9f43';
         }
         if (source === 'manual') {
             return '#bc8cff';

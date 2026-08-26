@@ -131,6 +131,37 @@ def encode_gif_bytes(arrays, fps):
             pass
 
 
+def encode_gif_from_video(video_path, fps):
+    """Make a looping GIF from a rendered MP4 using the FFmpeg palette."""
+    ffmpeg = get_ffmpeg_exe()
+    tmpdir = tempfile.mkdtemp(prefix='gif-from-mp4-')
+    path = os.path.join(tmpdir, 'out.gif')
+    command = [
+        ffmpeg,
+        '-y',
+        '-i', str(video_path),
+        '-vf', f'fps={fps},{PALETTE_FILTER}',
+        '-loop', '0',
+        path,
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, check=False)
+        if result.returncode != 0 or not os.path.exists(path) or os.path.getsize(path) == 0:
+            stderr = (result.stderr or b'').decode('utf-8', errors='replace')[-1500:]
+            raise RuntimeError(f'FFmpeg GIF from video failed: {stderr}')
+        with open(path, 'rb') as handle:
+            return handle.read()
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        try:
+            os.rmdir(tmpdir)
+        except OSError:
+            pass
+
+
 def encode_gif_pillow(frames, duration_ms):
     buffer = io.BytesIO()
     frames[0].save(

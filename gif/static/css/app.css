@@ -498,6 +498,11 @@ h1 {
     color: #f0b429;
 }
 
+.tag-prop {
+    background: rgba(255, 159, 67, 0.16);
+    color: #ff9f43;
+}
+
 .recent {
     margin-top: 36px;
 }

@@ -8,6 +8,7 @@ from ..choices import (
     SOURCE_CARD,
     SOURCE_MANUAL,
     SOURCE_OCR,
+    SOURCE_PROP,
     SOURCE_TITLE,
     SOURCE_YOLO,
 )
@@ -15,6 +16,7 @@ from ..models import DetectionObject
 from .detectors import get_object_detector, get_text_detector
 from .layout import group_ui_regions
 from .preprocessing import load_preprocessed_image
+from .segmentation import detect_props
 
 logger = logging.getLogger(__name__)
 
@@ -79,16 +81,33 @@ def merge_detections(detections, min_confidence=None, iou_threshold=None):
         ):
             continue
         others.append(item)
-    return others
+    return _drop_props_inside_ui(others)
+
+
+def _drop_props_inside_ui(detections):
+    """Keep dragon/gift/coins on the character; drop props that are just card art."""
+    ui = [
+        item for item in detections
+        if item.source in (SOURCE_CARD, SOURCE_BUTTON, SOURCE_TITLE)
+    ]
+    kept = []
+    for item in detections:
+        if item.source == SOURCE_PROP and any(
+            _intersection_over_union(item, region) >= 0.45 for region in ui
+        ):
+            continue
+        kept.append(item)
+    return kept
 
 
 def detect(image):
-    """Run YOLO and OCR, and also group OCR words into title/card/button regions."""
+    """Run YOLO, OCR, UI grouping, and open-vocab props (SAM 3 / YOLO-World)."""
     detections = []
     detections.extend(get_object_detector()(image))
     ocr = get_text_detector()(image)
     detections.extend(ocr)
     detections.extend(group_ui_regions(ocr))
+    detections.extend(detect_props(image))
     return merge_detections(detections)
 
 

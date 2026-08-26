@@ -53,6 +53,9 @@
         if (source === 'button') {
             return '#f778ba';
         }
+        if (source === 'prop') {
+            return '#ff9f43';
+        }
         return '#bc8cff';
     }
 

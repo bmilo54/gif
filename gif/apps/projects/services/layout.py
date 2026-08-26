@@ -37,7 +37,9 @@ def _is_heading(det):
 
 def _heading_label(members, source=None):
     if source == SOURCE_TITLE:
-        return sorted(members, key=lambda item: item.width * item.height, reverse=True)[0].label
+        parts = sorted(members, key=lambda item: (item.y, item.x))
+        joined = ' '.join(item.label for item in parts if item.label).strip()
+        return joined or parts[0].label
     headings = [item for item in members if _is_heading(item)]
     if headings:
         return sorted(headings, key=lambda item: item.y)[0].label
@@ -66,18 +68,34 @@ def _button_row(ocr):
     """Horizontal row of short labels near the bottom → equal pill buttons."""
     candidates = [
         item for item in ocr
-        if item.height <= 0.08 and _center_y(item) >= 0.78
+        if 0.81 <= _center_y(item) <= 0.89
+        and 0.10 <= item.width <= 0.40
+        and item.height <= 0.06
+        and sum(ch.isalpha() for ch in (item.label or '')) >= 4
     ]
     if len(candidates) < 2:
         return [], ocr
 
-    candidates = sorted(candidates, key=_center_y)
-    best = [candidates[0]]
-    for item in candidates[1:]:
-        if abs(_center_y(item) - _center_y(best[0])) <= 0.04:
-            best.append(item)
-    if len(best) < 2:
+    remaining = sorted(candidates, key=_center_y)
+    clusters = []
+    while remaining:
+        seed = remaining.pop(0)
+        band = [seed]
+        kept = []
+        for item in remaining:
+            if abs(_center_y(item) - _center_y(seed)) <= 0.02:
+                band.append(item)
+            else:
+                kept.append(item)
+        remaining = kept
+        if len(band) >= 2:
+            clusters.append(band)
+    if not clusters:
         return [], ocr
+    # Prefer the 3 trust badges over their smaller subtitle row underneath.
+    threes = [band for band in clusters if len(band) >= 3]
+    pool = threes or clusters
+    best = min(pool, key=lambda band: sum(_center_y(item) for item in band) / len(band))
 
     best = sorted(best, key=lambda item: item.x)
     consumed = {id(item) for item in best}
@@ -108,61 +126,78 @@ def _button_row(ocr):
     return buttons, leftover
 
 
-def _title_and_cards(ocr):
-    if not ocr:
-        return []
+def _is_offer_heading(det):
+    if not _is_heading(det):
+        return False
+    label = (det.label or '').lower()
+    skip = ('claim', 'now', 'together', 'rewards', 'get extra', 'more fun', 'more wins')
+    return not any(token in label for token in skip)
 
+
+def _offer_column(ocr, *, min_x, max_right=0.98):
+    """
+    Stacked bonus cards on one side (this poster: right-hand neon panels).
+    """
     headings = sorted(
         (
             item for item in ocr
-            if _is_heading(item) and _center_y(item) < 0.86
+            if _is_offer_heading(item)
+            and item.x >= min_x
+            and _center_y(item) < 0.82
         ),
         key=lambda item: item.y,
     )
-
-    column = [
-        item for item in headings
-        if item.x <= 0.45 and item.y >= 0.26
-    ]
-    if len(column) < 2:
-        column = []
+    if len(headings) < 2:
+        return [], set()
 
     regions = []
     assigned = set()
-    pad_x, pad_y = 0.010, 0.010
-
-    for index, heading in enumerate(column):
+    pad_x, pad_y = 0.012, 0.012
+    for index, heading in enumerate(headings):
         y_top = heading.y
-        y_limit = column[index + 1].y - 0.01 if index + 1 < len(column) else 0.88
-        heading_right = heading.x + heading.width
+        if index + 1 < len(headings):
+            y_limit = headings[index + 1].y - 0.012
+        else:
+            y_limit = min(0.82, heading.y + heading.height + 0.22)
         members = [
             item for item in ocr
-            if item.y + item.height * 0.35 >= y_top - 0.01
+            if item.x + item.width * 0.35 >= min_x
+            and item.y + item.height * 0.35 >= y_top - 0.012
             and item.y <= y_limit
-            and item.x + item.width * 0.5 <= heading_right + 0.06
         ]
         if not members:
             members = [heading]
         assigned.update(id(item) for item in members)
-
         x1, y1, x2, y2 = _union(members)
-        left_icons = [item for item in members if item.x + item.width * 0.5 < heading.x]
-        if left_icons:
-            x1 = min(item.x for item in left_icons)
-        else:
-            x1 = min(x1, heading.x - min(0.13, heading.height * 3.5))
-        x1 -= pad_x
+        x1 = min(x1, heading.x) - min(0.08, heading.height * 2.4) - pad_x
+        x1 = max(min_x - 0.04, x1)
         y1 -= pad_y
-        x2 = min(max(x2, heading_right) + pad_x, 0.56)
-        y2 += pad_y
-        if index + 1 < len(column):
-            y2 = min(y2, column[index + 1].y - 0.008)
+        x2 = min(max_right, max(x2, heading.x + heading.width) + pad_x)
+        y2 = min(y_limit, y2 + pad_y)
         regions.append(_region(SOURCE_CARD, members, x1, y1, x2 - x1, y2 - y1))
+    return regions, assigned
 
-    if len(regions) >= 2:
-        col_left = min(item.x for item in regions)
-        col_right = min(0.56, max(item.x + item.width for item in regions))
-        regions = [
+
+def _title_and_cards(ocr):
+    if not ocr:
+        return []
+
+    left_cards, left_assigned = _offer_column(
+        [item for item in ocr if item.x + item.width * 0.5 <= 0.56],
+        min_x=0.0,
+        max_right=0.56,
+    )
+    # This creative puts the offer stack on the right.
+    right_cards, right_assigned = _offer_column(
+        [item for item in ocr if item.x >= 0.44],
+        min_x=0.44,
+        max_right=0.99,
+    )
+
+    if len(left_cards) >= 2:
+        col_left = min(item.x for item in left_cards)
+        col_right = min(0.56, max(item.x + item.width for item in left_cards))
+        left_cards = [
             Detection(
                 label=item.label,
                 confidence=item.confidence,
@@ -173,25 +208,43 @@ def _title_and_cards(ocr):
                 height=item.height,
                 text_content=item.text_content,
             )
-            for item in regions
+            for item in left_cards
         ]
+    else:
+        left_cards, left_assigned = [], set()
+
+    if len(right_cards) < 2:
+        right_cards, right_assigned = [], set()
+
+    regions = left_cards + right_cards
+    assigned = left_assigned | right_assigned
 
     leftover = [item for item in ocr if id(item) not in assigned]
-    if leftover:
-        x1, y1, x2, y2 = _union(leftover)
-        if y1 < 0.28:
-            card_top = min((item.y for item in regions if item.source == SOURCE_CARD), default=y2)
-            y2 = min(y2, card_top - 0.008)
+    logo = [
+        item for item in leftover
+        if item.y < 0.20 and item.x + item.width * 0.5 < 0.55
+    ]
+    if logo:
+        x1, y1, x2, y2 = _union(logo)
+        area = max(x2 - x1, 0) * max(y2 - y1, 0)
+        if area <= 0.28:
+            left_card_top = min(
+                (
+                    item.y for item in regions
+                    if item.source == SOURCE_CARD
+                    and item.x + item.width * 0.5 < 0.45
+                ),
+                default=1.0,
+            )
+            y2 = min(y2, left_card_top - 0.008)
             regions.append(_region(
                 SOURCE_TITLE,
-                leftover,
-                x1 - pad_x,
-                y1 - pad_y,
-                (x2 - x1) + 2 * pad_x,
-                (y2 - y1) + pad_y,
+                logo,
+                x1 - 0.010,
+                y1 - 0.010,
+                (x2 - x1) + 0.020,
+                max((y2 - y1) + 0.010, 0.04),
             ))
-        else:
-            regions.extend(leftover)
     return regions
 
 
