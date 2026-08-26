@@ -236,26 +236,80 @@ const REGISTRY = {
  * @returns {React.CSSProperties}
  */
 export function computeEffectStyle(effects, frame, dur) {
+  const t = progress(frame, dur);
+  let transformStr = "";
+  let filterStr = "";
+  let style = { opacity: 1 };
+
+  // Float & Glow
+  if (effects.includes("float-glow")) {
+    const yOffset = Math.sin(t * Math.PI * 2) * 15;
+    transformStr += ` translateY(${yOffset}px)`;
+    const blur = 10 + Math.sin(t * Math.PI * 2) * 5;
+    filterStr += ` drop-shadow(0 0 ${blur}px rgba(120, 200, 255, 0.8))`;
+  }
+
+  // Slide Left
+  if (effects.includes("slide-left")) {
+    const slideProgress = Math.min(1, t * 3);
+    const x = (1 - slideProgress) * -200;
+    transformStr += ` translateX(${x}px)`;
+    style.opacity = Math.min(1, t * 5);
+  }
+
+  // Elastic Zoom-in
+  if (effects.includes("zoom-in")) {
+    const p = t * 3;
+    let s = 1;
+    if (p < 1) {
+      // Elastic out formula
+      s = 1 - Math.cos(p * Math.PI * 4.5) * Math.exp(-p * 6);
+    }
+    transformStr += ` scale(${s})`;
+  }
+
+  // Impact Shake
+  if (effects.includes("shake")) {
+    if (t < 0.2) {
+      const shakeAmt = (0.2 - t) * 100;
+      const x = Math.sin(t * 100) * shakeAmt;
+      const y = Math.cos(t * 110) * shakeAmt;
+      transformStr += ` translate(${x}px, ${y}px)`;
+    }
+  }
+
+  // Rainbow Cycle
+  if (effects.includes("rainbow")) {
+    const hue = Math.floor((t * 360 * 2) % 360);
+    filterStr += ` hue-rotate(${hue}deg) saturate(1.5)`;
+  }
+
+  // 3D Parallax Pan
+  if (effects.includes("parallax")) {
+    // Background moves -30px X and -15px Y.
+    // Character counter-moves slightly to appear closer.
+    const panX = t * 15;
+    const panY = t * 5;
+    transformStr += ` translate(${panX}px, ${panY}px) scale(1.02)`;
+  }
+
   const transforms = [];
   const filters = [];
-  let opacity = 1;
+  let opacity = style.opacity;
 
   for (const key of effects) {
     const entry = REGISTRY[key];
-    if (!entry || entry.kind === "lottie") {
+    if (!entry || entry.kind === "lottie" || ["float-glow", "slide-left", "zoom-in", "shake", "rainbow", "parallax"].includes(key)) {
       continue;
     }
     const result = entry.compute(frame, dur);
-    if (result.transform) {
-      transforms.push(result.transform);
-    }
-    if (result.filter) {
-      filters.push(result.filter);
-    }
-    if (result.opacity !== undefined) {
-      opacity *= result.opacity;
-    }
+    if (result.transform) transforms.push(result.transform);
+    if (result.filter) filters.push(result.filter);
+    if (result.opacity !== undefined) opacity *= result.opacity;
   }
+
+  if (transformStr) transforms.push(transformStr.trim());
+  if (filterStr) filters.push(filterStr.trim());
 
   return {
     ...(transforms.length ? { transform: transforms.join(" ") } : {}),

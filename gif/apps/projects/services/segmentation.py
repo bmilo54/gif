@@ -290,7 +290,7 @@ def _norm_box(x1, y1, x2, y2, img_w, img_h) -> dict:
     }
 
 
-def segment_characters(image, regions: list, tmp_dir: str) -> _List[CharacterLayer]:
+def segment_characters(image, regions: list, tmp_dir: str):
     """
     Produce one RGBA PNG per person region.
 
@@ -316,11 +316,15 @@ def segment_characters(image, regions: list, tmp_dir: str) -> _List[CharacterLay
     List[CharacterLayer]
     """
     import os
+    import numpy as _np
     from PIL import Image as _Image
 
     img_rgb = image.convert('RGB')
     img_w, img_h = img_rgb.size
     layers: _List[CharacterLayer] = []
+    
+    # Track all characters in a combined mask for background inpainting
+    bg_mask = _np.zeros((img_h, img_w), dtype=_np.uint8)
 
     char_idx = 0
     for region in regions:
@@ -337,14 +341,25 @@ def segment_characters(image, regions: list, tmp_dir: str) -> _List[CharacterLay
             # Apply mask to full image then crop
             rgba = img_rgb.convert('RGBA')
             r, g, b, a = rgba.split()
-            import numpy as _np
             alpha_ch = _Image.fromarray(mask_np, mode='L')
             rgba_masked = _Image.merge('RGBA', (r, g, b, alpha_ch))
             crop = rgba_masked.crop((x1, y1, x2, y2))
+            
+            # Combine into background mask
+            # Ensure mask_np has the correct shape for assignment
+            mh, mw = mask_np.shape[:2]
+            # Since segment_box might return a mask of size (img_h, img_w) if it was resized correctly,
+            # we just check shapes and use maximum.
+            if mh == img_h and mw == img_w:
+                bg_mask = _np.maximum(bg_mask, mask_np)
+            
             logger.info('Character %d: SAM mask crop (%dx%d)', char_idx, x2 - x1, y2 - y1)
         else:
             # Rect fallback
             crop = img_rgb.convert('RGBA').crop((x1, y1, x2, y2))
+            # Fill the fallback rectangle in the background mask
+            bg_mask[y1:y2, x1:x2] = 255
+            
             logger.info('Character %d: rect RGBA crop (%dx%d)', char_idx, x2 - x1, y2 - y1)
 
         mask_path = os.path.join(tmp_dir, f'char_{char_idx}.png')
@@ -359,4 +374,4 @@ def segment_characters(image, regions: list, tmp_dir: str) -> _List[CharacterLay
         ))
         char_idx += 1
 
-    return layers
+    return layers, _Image.fromarray(bg_mask, mode='L')

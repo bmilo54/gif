@@ -207,11 +207,30 @@ export const Promo = ({ poster, regions, characters }) => {
   // Person boxes are already baked into CharacterLayer via the characters prop.
   const uiRegions = allRegions.filter((r) => !isPersonRegion(r));
 
+  // Parallax global state
+  const isParallax = [...allRegions, ...allChars].some((r) =>
+    (r.effects || []).includes("parallax")
+  );
+
+  const t = frame / Math.max(dur, 1);
+  const bgScale = isParallax ? 1.08 : 1;
+  const bgX = isParallax ? t * -30 : 0;
+  const bgY = isParallax ? t * -15 : 0;
+
   return (
     <AbsoluteFill style={{ background: "#000", overflow: "hidden" }}>
       {/* 1. Full poster background */}
       {posterSrc && (
-        <Img src={posterSrc} style={{ width, height, objectFit: "fill" }} />
+        <Img
+          src={posterSrc}
+          style={{
+            width,
+            height,
+            objectFit: "fill",
+            transform: `scale(${bgScale}) translate(${bgX}px, ${bgY}px)`,
+            transformOrigin: "center center",
+          }}
+        />
       )}
 
       {/* 2. SAM-segmented characters — each with its own per-region effects */}

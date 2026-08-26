@@ -121,16 +121,35 @@ def generate_gif(job):
         try:
             poster_path = os.path.join(tmp, 'poster.png')
             mp4_path = os.path.join(tmp, 'out.mp4')
-            image.convert('RGB').save(poster_path)
-
-            # SAM 2.1 per-character segmentation
-            characters = segment_characters(image, detections, tmp)
+            # SAM 2.1 per-character segmentation and combined background mask
+            characters, combined_mask = segment_characters(image, detections, tmp)
+            
             if characters:
+                import cv2
+                import numpy as np
+                from PIL import Image
+
+                # Convert PIL image to OpenCV BGR format
+                img_cv = cv2.cvtColor(np.array(image.convert('RGB')), cv2.COLOR_RGB2BGR)
+                mask_cv = np.array(combined_mask)
+
+                # Dilate the mask slightly to ensure edges are cleanly inpainted
+                kernel = np.ones((5, 5), np.uint8)
+                mask_cv = cv2.dilate(mask_cv, kernel, iterations=2)
+
+                # Inpaint the background to remove characters
+                inpainted = cv2.inpaint(img_cv, mask_cv, 5, cv2.INPAINT_TELEA)
+
+                # Save the inpainted background as the poster
+                inpainted_pil = Image.fromarray(cv2.cvtColor(inpainted, cv2.COLOR_BGR2RGB))
+                inpainted_pil.save(poster_path)
+
                 logger.info(
-                    'Segmented %d character(s) for job %s',
+                    'Segmented %d character(s) and inpainted background for job %s',
                     len(characters), job.pk,
                 )
             else:
+                image.convert('RGB').save(poster_path)
                 logger.info('No person regions found; skipping character segmentation.')
 
             regions_payload = _regions_payload(detections)
