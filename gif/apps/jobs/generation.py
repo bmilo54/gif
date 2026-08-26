@@ -7,9 +7,9 @@ from django.conf import settings
 from django.core.files.base import ContentFile
 
 from apps.projects.services.preprocessing import load_preprocessed_image
+from apps.projects.services.segmentation import segment_characters
 
 from .encoding import encode_gif_from_video
-from .fal_liveportrait import fal_configured, render_liveportrait, should_use_fal
 from .models import AnimationJob
 from .remotion_render import remotion_available, render_promo_video
 
@@ -30,10 +30,15 @@ def _as_region(item):
         'y': float(item.y),
         'width': float(item.width),
         'height': float(item.height),
+        'effects': [],
     }
 
 
 def _regions_payload(detections):
+    """
+    Convert detection objects / region dicts into the canonical list expected
+    by Remotion.  Each region carries its own ``effects`` list.
+    """
     payload = []
     for item in detections:
         det = _as_region(item)
@@ -44,6 +49,7 @@ def _regions_payload(detections):
             'y': float(det['y']),
             'width': float(det['width']),
             'height': float(det['height']),
+            'effects': list(det.get('effects') or []),
         })
     return payload
 
@@ -65,10 +71,9 @@ def _save_job_outputs(job, gif_bytes, video_bytes, frame_count):
     job.status = STATUS_COMPLETED
     job.save(update_fields=['gif_file', 'video_file', 'frame_count', 'file_size', 'status'])
     logger.info(
-        "Animation generated for %s v%s (%s, %s frames, gif=%s bytes, mp4=%s bytes)",
+        "Animation generated for %s v%s (%s frames, gif=%s bytes, mp4=%s bytes)",
         project.project_id,
         job.version,
-        ','.join(job.get_animation_types()),
         frame_count,
         len(gif_bytes),
         len(video_bytes) if video_bytes else 0,
@@ -80,8 +85,9 @@ def generate_gif(job):
     """
     Render an AnimationJob.
 
-    Selected person boxes go to Fal LivePortrait (cropped face clip).
-    Cards, buttons, and titles stay sharp via Remotion + Lottie overlays.
+    Person regions are segmented by SAM 2.1 (transparent-background RGBA PNG).
+    Cards, buttons, titles, and props are animated in Remotion using per-region
+    Lottie / CSS effect lists.
     """
     if not isinstance(job, AnimationJob):
         job = AnimationJob.objects.select_related('project').prefetch_related(
@@ -107,38 +113,37 @@ def generate_gif(job):
             )
 
         image = load_preprocessed_image(project.image, max_side=settings.GIF_MAX_SIDE)
-        effects = job.get_animation_types()
         duration_ms = settings.GIF_DURATION_MS
         frame_count = settings.GIF_FRAME_COUNT
         fps = 1000.0 / float(duration_ms)
+
         tmp = tempfile.mkdtemp(prefix='remotion-job-')
         try:
             poster_path = os.path.join(tmp, 'poster.png')
             mp4_path = os.path.join(tmp, 'out.mp4')
-            person_path = os.path.join(tmp, 'person.mp4')
             image.convert('RGB').save(poster_path)
-            person_region = None
-            if should_use_fal(detections, effects):
-                _, person_region, request_id = render_liveportrait(
-                    image, detections, effects, person_path,
+
+            # SAM 2.1 per-character segmentation
+            characters = segment_characters(image, detections, tmp)
+            if characters:
+                logger.info(
+                    'Segmented %d character(s) for job %s',
+                    len(characters), job.pk,
                 )
-                if request_id:
-                    job.task_id = request_id
-                    job.save(update_fields=['task_id'])
-            elif not fal_configured():
-                logger.info('FAL_KEY not set; person stays still on the poster.')
+            else:
+                logger.info('No person regions found; skipping character segmentation.')
+
+            regions_payload = _regions_payload(detections)
 
             render_promo_video(
                 poster_path,
-                effects=effects,
-                regions=_regions_payload(detections),
+                regions=regions_payload,
                 width=image.width,
                 height=image.height,
                 fps=fps,
                 frame_count=frame_count,
                 output_mp4=mp4_path,
-                person_path=person_path if person_region else None,
-                person_region=person_region,
+                characters=characters,
             )
             with open(mp4_path, 'rb') as handle:
                 video_bytes = handle.read()

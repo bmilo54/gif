@@ -77,13 +77,17 @@
         }
 
         if (form.id === 'adjust-form') {
-            let regions = [];
-            try {
-                regions = JSON.parse((form.querySelector('#regions-input') || {}).value || '[]');
-            } catch (err) {
-                regions = [];
+            // Prefer the live array exposed by adjust.js (avoids the submit
+            // event ordering issue where the hidden input is serialized after
+            // this handler fires).
+            let regions = window.__adjustRegions || [];
+            if (!regions.length) {
+                try {
+                    regions = JSON.parse((form.querySelector('#regions-input') || {}).value || '[]');
+                } catch (err) {
+                    regions = [];
+                }
             }
-            const effects = form.querySelectorAll('input[name="animation_types"]:checked');
             if (!regions.length) {
                 event.preventDefault();
                 showAppDialog(
@@ -92,11 +96,15 @@
                 );
                 return;
             }
-            if (!effects.length) {
+            // Effects are now per-region inside the regions array.
+            const anyEffect = regions.some(function (r) {
+                return Array.isArray(r.effects) && r.effects.length > 0;
+            });
+            if (!anyEffect) {
                 event.preventDefault();
                 showAppDialog(
-                    'No effect selected',
-                    'Tick at least one animation effect before generating the GIF.'
+                    'No effects selected',
+                    'Select a region on the left, then tick at least one animation effect before generating the GIF.'
                 );
             }
             return;

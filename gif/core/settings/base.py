@@ -297,17 +297,10 @@ GIF_GLOW = 0.35
 GIF_SHINE_WIDTH = 0.18
 GIF_FEATHER = 10
 
-# Remotion renders the still poster plus Lottie UI overlays.
-# Fal LivePortrait animates a cropped person box on top of that poster.
+# Remotion renders the still poster plus per-region Lottie / CSS overlays.
+# SAM 2.1 segments character regions into transparent-bg PNGs for compositing.
 ANIMATION_RENDERER = 'remotion'
 REMOTION_DIR = os.path.join(os.path.dirname(BASE_DIR), 'remotion')
-
-# Fal.ai LivePortrait: https://fal.ai/dashboard/keys
-# Paste your Fal API key here. Leave empty to skip the person layer.
-FAL_DRIVING_VIDEO = (
-    'https://storage.googleapis.com/falserverless/model_tests/'
-    'live-portrait/liveportrait-example.mp4'
-)
 
 DATA_UPLOAD_MAX_NUMBER_FIELDS = None
 DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024 # 10MB

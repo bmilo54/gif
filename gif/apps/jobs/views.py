@@ -12,7 +12,6 @@ from django.views.generic.detail import SingleObjectMixin
 from apps.projects.models import Project
 
 from .generation import generate_gif
-from .choices import ANIMATION_TYPE_CHOICES
 from .models import AnimationJob
 from .services import (
     create_animation_job,
@@ -74,8 +73,8 @@ class AnimationJobAdjustView(DetailView):
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
-        context['animation_types'] = ANIMATION_TYPE_CHOICES
-        context['selected_effects'] = set(self.object.get_animation_types())
+        # Effects are now per-region and rendered by adjust.js;
+        # we only need to pass the regions data to seed the canvas.
         context['regions_data'] = self.object.get_regions()
         return context
 
@@ -89,8 +88,9 @@ class AnimationJobGenerateView(SingleObjectMixin, View):
         job = self.get_object()
         try:
             regions = parse_regions(request.POST.get('regions', '')) if request.POST.get('regions') else job.get_regions()
-            animation_types = parse_animation_types(request.POST.getlist('animation_types'))
-            save_job_adjustments(job, regions, animation_types)
+            # Effects are embedded inside each region dict; animation_types is
+            # kept on the job only as a historical record (pass empty list).
+            save_job_adjustments(job, regions, [])
             generate_gif(job)
         except ValidationError as exc:
             messages.error(request, ' '.join(exc.messages))

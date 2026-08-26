@@ -5,7 +5,7 @@
 
 {% block content %}
     <h1>{{ job.project.project_id }} &middot; v{{ job.version }}</h1>
-    <p class="subtitle">Drag a box to move it. Drag a corner or edge to resize so the effect stays on the card or button.</p>
+    <p class="subtitle">Drag a box to move it. Drag a corner or edge to resize. Select a region to set its animation effects.</p>
 
     <form method="post" action="{% url 'jobs:job_generate' pk=job.pk %}" id="adjust-form" class="card">
         {% csrf_token %}
@@ -22,20 +22,20 @@
 
         <p class="hint" id="adjust-hint" style="margin-top: 14px;">Click a region to select it. Arrow keys nudge. Delete removes it.</p>
 
-        <ul class="region-list" id="region-list"></ul>
-
-        <section class="effect-picker">
-            <h2>Animation effects</h2>
-            <p class="hint">Pick one or more. They stack on the same boxes. A selected person uses Fal LivePortrait when FAL_KEY is set. Cards, buttons, and titles use Remotion Lottie overlays.</p>
-            <div class="effect-grid">
-                {% for value, label in animation_types %}
-                    <label class="effect-option">
-                        <input type="checkbox" name="animation_types" value="{{ value }}"{% if value in selected_effects %} checked{% endif %}>
-                        <span>{{ label }}</span>
-                    </label>
-                {% endfor %}
+        <div class="adjust-body">
+            {# Left: region list #}
+            <div class="adjust-sidebar">
+                <h2 class="sidebar-title">Regions</h2>
+                <ul class="region-list" id="region-list"></ul>
             </div>
-        </section>
+
+            {# Right: per-region effect panel — populated by adjust.js #}
+            <div class="adjust-effects">
+                <div id="effect-panel">
+                    <p class="hint">Select a region to choose its animation effects.</p>
+                </div>
+            </div>
+        </div>
 
         <div class="card-footer">
             <div class="actions-primary">
@@ -50,5 +50,5 @@
 {% endblock %}
 
 {% block scripts %}
-    <script src="{% static 'js/adjust.js' %}"></script>
+    <script src="{% static 'js/adjust.js' %}?v=3"></script>
 {% endblock %}

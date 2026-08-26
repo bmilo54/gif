@@ -34,7 +34,6 @@ Django==6.1
 django-widget-tweaks==1.5.1
 docker==7.2.0
 docutils==0.19
-fal-client==1.0.1
 filelock==3.32.3
 fonttools==4.63.0
 frozenlist==1.8.0

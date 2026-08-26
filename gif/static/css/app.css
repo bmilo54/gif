@@ -654,3 +654,100 @@ body.dialog-open {
 .dialog .btn {
     width: 100%;
 }
+
+/* -----------------------------------------------------------------------
+   Adjust page — two-column layout (sidebar + effect panel)
+----------------------------------------------------------------------- */
+
+.adjust-body {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    gap: 24px;
+    margin-top: 20px;
+    align-items: start;
+}
+
+@media (max-width: 680px) {
+    .adjust-body {
+        grid-template-columns: 1fr;
+    }
+}
+
+.adjust-sidebar {
+    position: sticky;
+    top: 20px;
+}
+
+.sidebar-title {
+    font-size: 12px;
+    color: var(--muted);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    margin: 0 0 10px;
+}
+
+.adjust-effects {
+    min-height: 120px;
+}
+
+/* -----------------------------------------------------------------------
+   Per-region effect panel
+----------------------------------------------------------------------- */
+
+#effect-panel {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px;
+}
+
+.effect-panel-title {
+    font-size: 14px;
+    font-weight: 600;
+    margin: 0 0 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.effect-panel-empty {
+    color: var(--muted);
+    font-size: 13px;
+    text-align: center;
+    padding: 24px 0;
+}
+
+.effect-group {
+    margin-bottom: 18px;
+}
+
+.effect-group:last-child {
+    margin-bottom: 0;
+}
+
+.effect-group-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.7px;
+    color: var(--muted);
+    margin-bottom: 8px;
+}
+
+/* Region list — show effect count badge when effects are set */
+.region-pick .effect-badge {
+    margin-left: auto;
+    background: var(--accent);
+    color: #fff;
+    border-radius: 999px;
+    padding: 1px 7px;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+/* Muted text in tables */
+.muted {
+    color: var(--muted);
+}

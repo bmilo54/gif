@@ -6,7 +6,7 @@ from django.db import transaction
 from apps.projects.choices import SOURCE_MANUAL
 from apps.projects.models import DetectionObject
 
-from .choices import DEFAULT_ANIMATION_TYPES, ANIMATION_TYPE_CHOICES
+from .choices import DEFAULT_ANIMATION_TYPES, ANIMATION_TYPE_CHOICES, ANIMATION_TYPE_LABELS
 from .models import AnimationJob
 
 
@@ -91,14 +91,19 @@ def parse_regions(raw):
         raise ValidationError('Adjust at least one region.')
 
     regions = []
+    allowed_effects = set(ANIMATION_TYPE_LABELS.keys())
     for item in payload:
         if not isinstance(item, dict):
             raise ValidationError('Each region must be an object.')
         box = _clamp_region(item)
+        # Preserve per-region effects; silently ignore unknown keys.
+        raw_effects = item.get('effects') or []
+        effects = [e for e in raw_effects if e in allowed_effects]
         regions.append({
             'key': str(item.get('key') or '')[:64],
             'label': str(item.get('label') or 'Region')[:255],
             'source': str(item.get('source') or 'manual')[:32],
+            'effects': effects,
             **box,
         })
     return regions
@@ -115,12 +120,14 @@ def snapshot_regions(detections, manual_regions):
             'y': detection.y,
             'width': detection.width,
             'height': detection.height,
+            'effects': [],  # user fills this in on the adjust page
         })
     for index, region in enumerate(manual_regions):
         regions.append({
             'key': f'manual-{index}',
             'label': 'Manual region',
             'source': SOURCE_MANUAL,
+            'effects': [],
             **region,
         })
     return regions

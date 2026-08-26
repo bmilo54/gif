@@ -2,22 +2,21 @@ import React from "react";
 import { Lottie } from "@remotion/lottie";
 import {
   AbsoluteFill,
-  Easing,
   Img,
-  OffthreadVideo,
-  interpolate,
   staticFile,
   useCurrentFrame,
   useVideoConfig,
 } from "remotion";
-import glowData from "./lottie/glow.json";
-import shineData from "./lottie/shine.json";
+
 import sparkleData from "./lottie/sparkle.json";
+import { computeEffectStyle, needsLottie } from "./effects/registry";
+
+// ---------------------------------------------------------------------------
+// Asset helpers
+// ---------------------------------------------------------------------------
 
 function assetSrc(src) {
-  if (!src) {
-    return null;
-  }
+  if (!src) return null;
   if (
     src.startsWith("http://") ||
     src.startsWith("https://") ||
@@ -29,46 +28,44 @@ function assetSrc(src) {
   return staticFile(src);
 }
 
-const UI_SOURCES = new Set(["card", "button", "title", "ocr"]);
+// ---------------------------------------------------------------------------
+// Lottie preset map
+// ---------------------------------------------------------------------------
+
 const LOTTIE_PRESETS = {
-  shine: shineData,
   sparkle: sparkleData,
-  glow: glowData,
 };
 
-function isUiRegion(region) {
-  return UI_SOURCES.has((region.source || "").toLowerCase());
-}
+// ---------------------------------------------------------------------------
+// Pixel-box helpers
+// ---------------------------------------------------------------------------
 
-function hasEffect(effects, name) {
-  return Array.isArray(effects) && effects.includes(name);
-}
-
-function boxPixels(region, canvasWidth, canvasHeight) {
-  const left = region.x * canvasWidth;
-  const top = region.y * canvasHeight;
-  const width = region.width * canvasWidth;
-  const height = region.height * canvasHeight;
+function boxPixels(region, canvasW, canvasH) {
+  const left   = region.x * canvasW;
+  const top    = region.y * canvasH;
+  const width  = region.width * canvasW;
+  const height = region.height * canvasH;
+  const src    = (region.source || "").toLowerCase();
   const radius =
-    (region.source || "").toLowerCase() === "button"
+    src === "button"
       ? Math.max(4, height / 2)
       : Math.min(16, Math.min(width, height) * 0.12);
   return { left, top, width, height, radius };
 }
 
-function useLoopWave() {
-  const frame = useCurrentFrame();
-  const { durationInFrames } = useVideoConfig();
-  const duration = Math.max(durationInFrames, 1);
-  return interpolate(frame, [0, duration / 2, duration], [0, 1, 0], {
-    easing: Easing.inOut(Easing.sin),
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
-}
+// ---------------------------------------------------------------------------
+// CharacterLayer
+// Renders one SAM-segmented character PNG (transparent bg) positioned by bbox.
+// ---------------------------------------------------------------------------
 
-function RegionSlice({ region, poster, canvasWidth, canvasHeight, scale, translateY, filter }) {
-  const { left, top, width, height, radius } = boxPixels(region, canvasWidth, canvasHeight);
+function CharacterLayer({ character, canvasW, canvasH, frame, dur }) {
+  const { src, bbox, effects } = character;
+  const imgSrc = assetSrc(src);
+  if (!imgSrc || !bbox || !(bbox.width > 0) || !(bbox.height > 0)) return null;
+
+  const { left, top, width, height } = boxPixels(bbox, canvasW, canvasH);
+  const effectStyle = computeEffectStyle(effects || [], frame, dur);
+
   return (
     <div
       style={{
@@ -78,53 +75,30 @@ function RegionSlice({ region, poster, canvasWidth, canvasHeight, scale, transla
         width,
         height,
         overflow: "hidden",
-        borderRadius: radius,
         pointerEvents: "none",
+        transformOrigin: "center center",
+        ...effectStyle,
       }}
     >
       <Img
-        src={poster}
-        style={{
-          position: "absolute",
-          left: -left,
-          top: -top,
-          width: canvasWidth,
-          height: canvasHeight,
-          objectFit: "fill",
-          transform: `translateY(${translateY}px) scale(${scale})`,
-          transformOrigin: `${left + width / 2}px ${top + height / 2}px`,
-          filter,
-        }}
+        src={imgSrc}
+        style={{ width: "100%", height: "100%", objectFit: "fill" }}
       />
     </div>
   );
 }
 
-function lottieNames(effects) {
-  const names = [];
-  if (hasEffect(effects, "shine")) {
-    names.push("shine");
-  }
-  if (hasEffect(effects, "sparkle")) {
-    names.push("sparkle");
-  }
-  if (
-    hasEffect(effects, "glow") ||
-    hasEffect(effects, "gold_pulse") ||
-    hasEffect(effects, "rim") ||
-    hasEffect(effects, "fade") ||
-    hasEffect(effects, "flicker")
-  ) {
-    names.push("glow");
-  }
-  return names;
-}
+// ---------------------------------------------------------------------------
+// LottieOverlay
+// Renders a Lottie animation covering a region (mix-blend: screen).
+// ---------------------------------------------------------------------------
 
-function LottieBox({ region, canvasWidth, canvasHeight, animationData, durationInFrames }) {
-  const { left, top, width, height, radius } = boxPixels(region, canvasWidth, canvasHeight);
+function LottieOverlay({ region, animationData, canvasW, canvasH, dur }) {
+  const { left, top, width, height, radius } = boxPixels(region, canvasW, canvasH);
   const ip = Number(animationData.ip) || 0;
   const op = Number(animationData.op) || 60;
-  const playbackRate = (op - ip) / Math.max(durationInFrames, 1);
+  const playbackRate = (op - ip) / Math.max(dur, 1);
+
   return (
     <div
       style={{
@@ -150,112 +124,121 @@ function LottieBox({ region, canvasWidth, canvasHeight, animationData, durationI
   );
 }
 
-function PersonLayer({ src, region, canvasWidth, canvasHeight }) {
-  if (!src || !region || !(region.width > 0) || !(region.height > 0)) {
-    return null;
-  }
-  const { left, top, width, height } = boxPixels(region, canvasWidth, canvasHeight);
+// ---------------------------------------------------------------------------
+// RegionEffectLayer
+// For non-person regions (card, button, ocr …): renders the poster slice with
+// its own CSS effects, then Lottie overlays if requested.
+// ---------------------------------------------------------------------------
+
+function RegionEffectLayer({ region, posterSrc, canvasW, canvasH, frame, dur }) {
+  const { left, top, width, height, radius } = boxPixels(region, canvasW, canvasH);
+  const effects  = region.effects || [];
+  const effectStyle = computeEffectStyle(effects, frame, dur);
+
   return (
-    <div
-      style={{
-        position: "absolute",
-        left,
-        top,
-        width,
-        height,
-        overflow: "hidden",
-        pointerEvents: "none",
-      }}
-    >
-      <OffthreadVideo
-        src={src}
-        muted
-        volume={0}
-        loop
+    <>
+      {/* Poster slice with motion / lighting effects */}
+      <div
         style={{
-          width: "100%",
-          height: "100%",
-          objectFit: "cover",
+          position: "absolute",
+          left,
+          top,
+          width,
+          height,
+          overflow: "hidden",
+          borderRadius: radius,
+          pointerEvents: "none",
+          transformOrigin: "center center",
+          ...effectStyle,
         }}
-      />
-    </div>
+      >
+        <Img
+          src={posterSrc}
+          style={{
+            position: "absolute",
+            left: -left,
+            top: -top,
+            width: canvasW,
+            height: canvasH,
+            objectFit: "fill",
+          }}
+        />
+      </div>
+
+      {/* Lottie overlays for sparkle / glow particle effects */}
+      {needsLottie(effects) &&
+        Object.entries(LOTTIE_PRESETS)
+          .filter(([key]) => effects.includes(key))
+          .map(([key, data]) => (
+            <LottieOverlay
+              key={`lottie-${key}-${region.key || ""}`}
+              region={region}
+              animationData={data}
+              canvasW={canvasW}
+              canvasH={canvasH}
+              dur={dur}
+            />
+          ))}
+    </>
   );
 }
 
-export const Promo = ({ poster, person, personRegion, effects, regions }) => {
-  const { durationInFrames, width, height } = useVideoConfig();
-  const wave = useLoopWave();
-  const list = Array.isArray(effects) ? effects : [];
-  const boxes = Array.isArray(regions) ? regions : [];
-  const overlayBoxes = boxes.filter(isUiRegion);
-  const posterSrc = assetSrc(poster);
-  const personSrc = assetSrc(person);
-  const overlays = lottieNames(list);
-  const progress = useCurrentFrame() / Math.max(durationInFrames, 1);
+// ---------------------------------------------------------------------------
+// Promo composition
+// ---------------------------------------------------------------------------
 
-  const needsSlice =
-    hasEffect(list, "zoom") || hasEffect(list, "float") || hasEffect(list, "breathe");
+const PERSON_SOURCES = new Set(["yolo", "sam"]);
 
-  let scale = 1;
-  if (hasEffect(list, "zoom")) {
-    scale += interpolate(wave, [0, 1], [0, 0.08], {
-      extrapolateLeft: "clamp",
-      extrapolateRight: "clamp",
-    });
-  }
-  if (hasEffect(list, "breathe")) {
-    scale += interpolate(wave, [0, 1], [0, 0.03], {
-      extrapolateLeft: "clamp",
-      extrapolateRight: "clamp",
-    });
-  }
+function isPersonRegion(region) {
+  const src   = (region.source || "").toLowerCase();
+  const label = (region.label  || "").toLowerCase();
+  return PERSON_SOURCES.has(src) || label.includes("person");
+}
 
-  const translateY = hasEffect(list, "float")
-    ? interpolate(progress, [0, 0.5, 1], [0, -6, 0], {
-        easing: Easing.inOut(Easing.sin),
-        extrapolateLeft: "clamp",
-        extrapolateRight: "clamp",
-      })
-    : 0;
+export const Promo = ({ poster, regions, characters }) => {
+  const { durationInFrames: dur, width, height } = useVideoConfig();
+  const frame = useCurrentFrame();
+
+  const posterSrc  = assetSrc(poster);
+  const allRegions = Array.isArray(regions)    ? regions    : [];
+  const allChars   = Array.isArray(characters) ? characters : [];
+
+  // UI regions: everything that is NOT a raw yolo/sam person box.
+  // Person boxes are already baked into CharacterLayer via the characters prop.
+  const uiRegions = allRegions.filter((r) => !isPersonRegion(r));
 
   return (
     <AbsoluteFill style={{ background: "#000", overflow: "hidden" }}>
-      {posterSrc ? <Img src={posterSrc} style={{ width, height, objectFit: "fill" }} /> : null}
-
-      <PersonLayer
-        src={personSrc}
-        region={personRegion}
-        canvasWidth={width}
-        canvasHeight={height}
-      />
-
-      {needsSlice && posterSrc
-        ? overlayBoxes.map((region, index) => (
-            <RegionSlice
-              key={`slice-${index}`}
-              region={region}
-              poster={posterSrc}
-              canvasWidth={width}
-              canvasHeight={height}
-              scale={scale}
-              translateY={translateY}
-              filter="none"
-            />
-          ))
-        : null}
-
-      {overlays.flatMap((name) =>
-        overlayBoxes.map((region, index) => (
-          <LottieBox
-            key={`lottie-${name}-${index}`}
-            region={region}
-            canvasWidth={width}
-            canvasHeight={height}
-            animationData={LOTTIE_PRESETS[name]}
-            durationInFrames={durationInFrames}
-          />
-        )),
+      {/* 1. Full poster background */}
+      {posterSrc && (
+        <Img src={posterSrc} style={{ width, height, objectFit: "fill" }} />
       )}
+
+      {/* 2. SAM-segmented characters — each with its own per-region effects */}
+      {allChars.map((char) => (
+        <CharacterLayer
+          key={`char-${char.index}`}
+          character={char}
+          canvasW={width}
+          canvasH={height}
+          frame={frame}
+          dur={dur}
+        />
+      ))}
+
+      {/* 3. UI regions (card, button, ocr, title, prop …) — each with its own effects */}
+      {posterSrc &&
+        uiRegions.map((region, idx) => (
+          <RegionEffectLayer
+            key={`region-${region.key || idx}`}
+            region={region}
+            posterSrc={posterSrc}
+            canvasW={width}
+            canvasH={height}
+            frame={frame}
+            dur={dur}
+          />
+        ))}
     </AbsoluteFill>
   );
 };

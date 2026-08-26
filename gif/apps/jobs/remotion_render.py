@@ -43,20 +43,29 @@ def remotion_available():
 def render_promo_video(
     poster_path,
     *,
-    effects,
     regions,
     width,
     height,
     fps,
     frame_count,
     output_mp4,
-    person_path=None,
-    person_region=None,
+    characters=None,
 ):
     """
     Render the Promo composition with local Remotion (no AWS).
 
-    Returns the output MP4 path.
+    Parameters
+    ----------
+    poster_path:
+        Full-image PNG used as the static background layer.
+    regions:
+        List of region dicts, each carrying its own ``effects`` list.
+        Non-person regions (card, button, ocr …) are rendered as Lottie /
+        CSS overlay layers inside Remotion.
+    characters:
+        Optional list of ``CharacterLayer`` objects returned by
+        ``segment_characters()``.  Each character is a per-person RGBA PNG
+        (transparent background) that Remotion composites on top of the poster.
     """
     if not remotion_available():
         raise RuntimeError(
@@ -66,21 +75,30 @@ def render_promo_video(
     project = remotion_dir()
     output_mp4 = Path(output_mp4)
     output_mp4.parent.mkdir(parents=True, exist_ok=True)
+
     public_id = f'renders/{uuid.uuid4().hex}'
     public_dir = project / 'public' / public_id.replace('/', os.sep)
     public_dir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(poster_path, public_dir / 'poster.png')
-    person_prop = ''
-    if person_path and os.path.exists(person_path):
-        shutil.copyfile(person_path, public_dir / 'person.mp4')
-        person_prop = f'{public_id}/person.mp4'
+
+    # Copy each character mask PNG into Remotion's public dir
+    characters_prop = []
+    for char in (characters or []):
+        src = char.mask_png_path
+        if src and os.path.exists(src):
+            fname = f'char_{char.character_index}.png'
+            shutil.copyfile(src, public_dir / fname)
+            characters_prop.append({
+                'src': f'{public_id}/{fname}',
+                'bbox': char.bbox_norm,
+                'effects': list(char.effects),
+                'index': char.character_index,
+            })
 
     props = {
         'poster': f'{public_id}/poster.png',
-        'person': person_prop,
-        'personRegion': person_region or {},
-        'effects': list(effects or []),
         'regions': list(regions or []),
+        'characters': characters_prop,
         'width': int(width),
         'height': int(height),
         'fps': int(round(fps)),

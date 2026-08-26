@@ -236,3 +236,127 @@ def crop_mask(full_mask, box):
     width = min(int(width), w - left)
     height = min(int(height), h - top)
     return Image.fromarray(full_mask[top:top + height, left:left + width], mode='L')
+
+
+# ---------------------------------------------------------------------------
+# Public: per-character segmentation for the animation pipeline
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass, field as _field   # noqa: E402
+from typing import List as _List                      # noqa: E402
+
+
+@dataclass
+class CharacterLayer:
+    """One segmented character, ready for Remotion compositing."""
+    mask_png_path: str          # absolute path to RGBA PNG (transparent bg)
+    bbox_norm: dict             # {x, y, width, height} normalised 0-1 in full image
+    character_index: int
+    effects: _List[str]         # per-character effects chosen by the user
+    source_region: dict         # original region dict
+
+
+_PERSON_SOURCES = {'yolo', 'sam'}
+
+
+def _is_person_region(region: dict) -> bool:
+    source = (region.get('source') or '').lower()
+    label = (region.get('label') or '').lower()
+    return source in _PERSON_SOURCES or 'person' in label
+
+
+def _pixel_box_padded(region: dict, img_w: int, img_h: int, pad: float = 0.04):
+    """Normalised region → integer pixel coords with padding."""
+    x = region['x'] * img_w
+    y = region['y'] * img_h
+    w = region['width'] * img_w
+    h = region['height'] * img_h
+    px, py = w * pad, h * pad
+    x1 = max(0, int(x - px))
+    y1 = max(0, int(y - py))
+    x2 = min(img_w, int(x + w + px))
+    y2 = min(img_h, int(y + h + py))
+    return x1, y1, x2, y2
+
+
+def _norm_box(x1, y1, x2, y2, img_w, img_h) -> dict:
+    return {
+        'source': 'sam',
+        'label': 'person',
+        'x': x1 / img_w,
+        'y': y1 / img_h,
+        'width': (x2 - x1) / img_w,
+        'height': (y2 - y1) / img_h,
+    }
+
+
+def segment_characters(image, regions: list, tmp_dir: str) -> _List[CharacterLayer]:
+    """
+    Produce one RGBA PNG per person region.
+
+    For each region whose source is 'yolo' / 'sam' or whose label contains
+    'person', this function runs SAM 2.1 box-prompted segmentation and saves
+    the masked crop as ``char_N.png`` inside *tmp_dir*.  Non-person regions
+    are skipped (they are rendered as UI overlays directly in Remotion).
+
+    Falls back to a rectangular RGBA crop when SAM is unavailable.
+
+    Parameters
+    ----------
+    image:
+        Full PIL image (any mode).
+    regions:
+        List of region dicts with normalised 0-1 coordinates, each optionally
+        carrying an ``effects`` list.
+    tmp_dir:
+        Writable directory for the PNG files.
+
+    Returns
+    -------
+    List[CharacterLayer]
+    """
+    import os
+    from PIL import Image as _Image
+
+    img_rgb = image.convert('RGB')
+    img_w, img_h = img_rgb.size
+    layers: _List[CharacterLayer] = []
+
+    char_idx = 0
+    for region in regions:
+        if not _is_person_region(region):
+            continue
+
+        x1, y1, x2, y2 = _pixel_box_padded(region, img_w, img_h)
+        effects = list(region.get('effects') or [])
+
+        # --- try SAM mask ---
+        mask_np = segment_box(img_rgb, [x1, y1, x2, y2])
+
+        if mask_np is not None:
+            # Apply mask to full image then crop
+            rgba = img_rgb.convert('RGBA')
+            r, g, b, a = rgba.split()
+            import numpy as _np
+            alpha_ch = _Image.fromarray(mask_np, mode='L')
+            rgba_masked = _Image.merge('RGBA', (r, g, b, alpha_ch))
+            crop = rgba_masked.crop((x1, y1, x2, y2))
+            logger.info('Character %d: SAM mask crop (%dx%d)', char_idx, x2 - x1, y2 - y1)
+        else:
+            # Rect fallback
+            crop = img_rgb.convert('RGBA').crop((x1, y1, x2, y2))
+            logger.info('Character %d: rect RGBA crop (%dx%d)', char_idx, x2 - x1, y2 - y1)
+
+        mask_path = os.path.join(tmp_dir, f'char_{char_idx}.png')
+        crop.save(mask_path, format='PNG')
+
+        layers.append(CharacterLayer(
+            mask_png_path=mask_path,
+            bbox_norm=_norm_box(x1, y1, x2, y2, img_w, img_h),
+            character_index=char_idx,
+            effects=effects,
+            source_region=region,
+        ))
+        char_idx += 1
+
+    return layers
