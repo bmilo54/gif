@@ -25,11 +25,19 @@
     // -----------------------------------------------------------------------
     const EFFECT_GROUPS = [
         {
-            label: 'Animation',
+            label: 'Character Dynamics',
+            forPerson: true,
+            effects: [
+                { key: 'breathe', label: 'Breathe (Expand)' },
+                { key: 'natural-breathe', label: 'Natural Breathe (Vertical)' },
+            ]
+        },
+        {
+            label: 'UI Animation',
+            forUi: true,
             effects: [
                 { key: 'float', label: 'Idle float' },
                 { key: 'float-glow', label: 'Float & Glow' },
-                { key: 'breathe', label: 'Breathe' },
                 { key: 'zoom', label: 'Slow zoom' },
                 { key: 'bounce', label: 'Bounce' },
                 { key: 'shake', label: 'Impact Shake' },
@@ -39,6 +47,7 @@
         },
         {
             label: 'Entrance / Motion',
+            forUi: true,
             effects: [
                 { key: 'slide-up', label: 'Slide Up' },
                 { key: 'slide-left', label: 'Slide from Left' },
@@ -46,16 +55,11 @@
             ]
         },
         {
-            label: 'Camera',
-            effects: [
-                { key: 'parallax', label: '3D Parallax Pan' },
-            ]
-        },
-        {
             label: 'Lighting / Color',
             effects: [
                 { key: 'glow', label: 'Glow pulse' },
                 { key: 'rim', label: 'Rim light' },
+                { key: 'neon_pulse', label: 'Neon Pulse' },
                 { key: 'shine', label: 'Shine sweep' },
                 { key: 'gold_pulse', label: 'Gold pulse' },
                 { key: 'flicker', label: 'Flicker' },
@@ -216,6 +220,12 @@
             + item.source + '</span> '
             + escapeHtml(item.label) + '</h3>';
 
+        const currentColor = item.color || '#ffecb4';
+        html += '<div class="effect-settings" style="margin-bottom: 15px; display: flex; align-items: center; gap: 10px;">'
+             +  '<label for="region-color-picker" style="font-weight: 500; font-size: 14px; color: #c9d1d9;">Glow/Rim Color:</label>'
+             +  '<input type="color" id="region-color-picker" value="' + currentColor + '" style="background: none; border: 1px solid #30363d; border-radius: 4px; padding: 0; width: 32px; height: 32px; cursor: pointer;">'
+             +  '</div>';
+
         const bgSize = (100 / item.width).toFixed(2) + '% ' + (100 / item.height).toFixed(2) + '%';
         const bgPosX = item.width < 1 ? (item.x / (1 - item.width) * 100).toFixed(2) + '%' : '0%';
         const bgPosY = item.height < 1 ? (item.y / (1 - item.height) * 100).toFixed(2) + '%' : '0%';
@@ -223,10 +233,33 @@
                         'background-size: ' + bgSize + '; ' +
                         'background-position: ' + bgPosX + ' ' + bgPosY + ';';
 
+        const isPerson = ['sam', 'yolo'].includes((item.source || '').toLowerCase()) || 
+                         (item.label || '').toLowerCase().includes('person');
+        const isProp = item.source === 'prop';
+
+        // For non-person, non-prop regions, show an "Attach to Person" toggle
+        if (!isPerson) {
+            const attachChecked = isProp ? ' checked' : '';
+            html += '<div class="effect-settings" style="margin-bottom:12px;display:flex;align-items:center;gap:8px;padding:8px 10px;background:rgba(255,255,255,0.04);border-radius:8px;border:1px solid #30363d;">'
+                 +  '<input type="checkbox" id="attach-to-person" style="width:16px;height:16px;cursor:pointer;"' + attachChecked + '>'
+                 +  '<label for="attach-to-person" style="font-size:13px;color:#c9d1d9;cursor:pointer;user-select:none;">'
+                 +  '📌 <strong>Attach to Person</strong> — this item (coin, object, etc.) moves with the person next to it</label>'
+                 +  '</div>';
+        }
+
         EFFECT_GROUPS.forEach(function (group) {
+            // Filter groups based on region type
+            if (isPerson && group.forUi) return;
+            if (!isPerson && group.forPerson) return;
+
             html += '<div class="effect-group"><div class="effect-group-label">' + group.label + '</div>';
             html += '<div class="effect-grid">';
             group.effects.forEach(function (effect) {
+                // Hide opacity-based effects for people since they do nothing without inpainting
+                if (isPerson && (effect.key === 'fade' || effect.key === 'flicker')) {
+                    return;
+                }
+                
                 const checked = current.has(effect.key) ? ' checked' : '';
                 html += '<label class="effect-option" title="Preview: ' + effect.label + '">'
                      +  '<input type="checkbox" class="region-effect-check"'
@@ -254,6 +287,30 @@
                 syncHidden();
             });
         });
+
+        // Wire up color picker
+        const colorPicker = effectPanel.querySelector('#region-color-picker');
+        if (colorPicker) {
+            colorPicker.addEventListener('input', function (e) {
+                regions[selected].color = e.target.value;
+                syncHidden();
+            });
+        }
+
+        // Wire up Attach to Person toggle
+        const attachCheck = effectPanel.querySelector('#attach-to-person');
+        if (attachCheck) {
+            attachCheck.addEventListener('change', function () {
+                if (attachCheck.checked) {
+                    regions[selected].source = 'prop';
+                } else {
+                    regions[selected].source = 'manual';
+                }
+                syncHidden();
+                renderList();  // refresh sidebar tag colour
+                renderEffectPanel();  // re-render panel to reflect change
+            });
+        }
     }
 
     function escapeHtml(str) {

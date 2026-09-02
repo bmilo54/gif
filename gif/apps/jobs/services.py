@@ -58,7 +58,16 @@ def parse_manual_regions(raw):
     if not isinstance(payload, list):
         raise ValidationError('Drawn regions must be a list.')
 
-    return [_clamp_region(region) for region in payload]
+    return [
+        {
+            **_clamp_region(region),
+            # Preserve label and source from the frontend (JS confirm prompt
+            # sets label='person' when user confirms it is a character).
+            'label': str(region.get('label') or 'manual region')[:255],
+            'source': str(region.get('source') or 'manual')[:32],
+        }
+        for region in payload
+    ]
 
 
 def parse_animation_types(raw_list):
@@ -99,13 +108,17 @@ def parse_regions(raw):
         # Preserve per-region effects; silently ignore unknown keys.
         raw_effects = item.get('effects') or []
         effects = [e for e in raw_effects if e in allowed_effects]
-        regions.append({
+        color = item.get('color')
+        region_data = {
             'key': str(item.get('key') or '')[:64],
             'label': str(item.get('label') or 'Region')[:255],
             'source': str(item.get('source') or 'manual')[:32],
             'effects': effects,
             **box,
-        })
+        }
+        if color:
+            region_data['color'] = str(color)[:32]
+        regions.append(region_data)
     return regions
 
 
@@ -125,10 +138,12 @@ def snapshot_regions(detections, manual_regions):
     for index, region in enumerate(manual_regions):
         regions.append({
             'key': f'manual-{index}',
-            'label': 'Manual region',
-            'source': SOURCE_MANUAL,
+            # Use the label the user set (e.g. 'person') rather than
+            # hardcoding 'Manual region', so _is_person_region() works.
+            'label': region.get('label') or 'manual region',
+            'source': region.get('source') or SOURCE_MANUAL,
             'effects': [],
-            **region,
+            **{k: v for k, v in region.items() if k in ('x', 'y', 'width', 'height')},
         })
     return regions
 
@@ -150,9 +165,11 @@ def create_animation_job(project, detection_ids, manual_regions, animation_types
     manual_objects = [
         DetectionObject(
             project=project,
-            label='Manual region',
+            # Preserve the label from the frontend (may be 'person' if the
+            # user confirmed the drawn box is a character).
+            label=region.get('label') or 'Manual region',
             confidence=1.0,
-            source=SOURCE_MANUAL,
+            source=region.get('source') or SOURCE_MANUAL,
             x=region['x'],
             y=region['y'],
             width=region['width'],

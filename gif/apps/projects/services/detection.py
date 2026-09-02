@@ -13,7 +13,7 @@ from ..choices import (
     SOURCE_YOLO,
 )
 from ..models import DetectionObject
-from .detectors import get_object_detector, get_text_detector
+from .detectors import get_character_detector, get_object_detector, get_text_detector
 from .layout import group_ui_regions
 from .preprocessing import load_preprocessed_image
 from .segmentation import detect_props
@@ -76,10 +76,9 @@ def merge_detections(detections, min_confidence=None, iou_threshold=None):
     ]
     others = []
     for item in merged:
-        if item.source == SOURCE_YOLO and any(
-            _intersection_over_union(item, text) >= 0.15 for text in text_like
-        ):
-            continue
+        if item.source == SOURCE_YOLO and item.label != 'person':
+            if any(_intersection_over_union(item, text) >= 0.15 for text in text_like):
+                continue
         others.append(item)
     return _drop_props_inside_ui(others)
 
@@ -101,9 +100,14 @@ def _drop_props_inside_ui(detections):
 
 
 def detect(image):
-    """Run YOLO, OCR, UI grouping, and open-vocab props (SAM 3 / YOLO-World)."""
+    """Run YOLO, YOLO-World characters, OCR, UI grouping, and open-vocab props."""
     detections = []
+    # Standard YOLO: detects real persons from COCO.
     detections.extend(get_object_detector()(image))
+    # YOLO-World: open-vocab scan for cartoon / anime / 3D characters.
+    char_detector = get_character_detector()
+    if char_detector is not None:
+        detections.extend(char_detector(image))
     ocr = get_text_detector()(image)
     detections.extend(ocr)
     detections.extend(group_ui_regions(ocr))

@@ -48,12 +48,8 @@ const REGISTRY = {
   float: {
     kind: "motion",
     compute(frame, dur) {
-      const ty = interpolate(
-        progress(frame, dur),
-        [0, 0.5, 1],
-        [0, -6, 0],
-        { easing: Easing.inOut(Easing.sin), extrapolateLeft: "clamp", extrapolateRight: "clamp" }
-      );
+      // One full sin-wave cycle over the clip → perfectly smooth loop
+      const ty = Math.sin((frame / Math.max(dur, 1)) * Math.PI * 2) * -10;
       return { transform: `translateY(${ty}px)` };
     },
   },
@@ -61,7 +57,7 @@ const REGISTRY = {
   breathe: {
     kind: "motion",
     compute(frame, dur) {
-      const s = 1 + interpolate(wave(frame, dur), [0, 1], [0, 0.03], {
+      const s = 1 + interpolate(wave(frame, dur), [0, 1], [0, 0.015], {
         extrapolateLeft: "clamp",
         extrapolateRight: "clamp",
       });
@@ -69,10 +65,28 @@ const REGISTRY = {
     },
   },
 
+  "natural-breathe": {
+    kind: "motion",
+    compute(frame, dur) {
+      // Scales only on Y axis from the bottom. Mimics taking a breath.
+      // Zero horizontal expansion means it will NEVER overlap adjacent UI cards!
+      const sy = 1 + interpolate(wave(frame, dur), [0, 1], [0, 0.025], {
+        extrapolateLeft: "clamp",
+        extrapolateRight: "clamp",
+      });
+      return { 
+        transform: `scaleY(${sy})`,
+        transformOrigin: "bottom center" 
+      };
+    },
+  },
+
+
+
   zoom: {
     kind: "motion",
     compute(frame, dur) {
-      const s = 1 + interpolate(wave(frame, dur), [0, 1], [0, 0.08], {
+      const s = 1 + interpolate(wave(frame, dur), [0, 1], [0, 0.03], {
         extrapolateLeft: "clamp",
         extrapolateRight: "clamp",
       });
@@ -150,6 +164,18 @@ const REGISTRY = {
         extrapolateRight: "clamp",
       });
       return { filter: `drop-shadow(0 0 ${intensity}px rgba(180,140,255,${opacity}))` };
+    },
+  },
+
+  neon_pulse: {
+    kind: "filter",
+    compute(frame, dur, regionColor) {
+      const w = wave(frame, dur);
+      // Pulsing intense glow filter 
+      const blur = 5 + w * 15;
+      const opacity = 0.5 + w * 0.5;
+      const c = regionColor || "rgba(0, 255, 200, 1)";
+      return { filter: `drop-shadow(0px 0px ${blur}px ${c}) opacity(${opacity})` };
     },
   },
 
@@ -233,9 +259,10 @@ const REGISTRY = {
  * @param {string[]} effects   - effect keys active on this region
  * @param {number}   frame     - current Remotion frame
  * @param {number}   dur       - total durationInFrames
+ * @param {string}   [regionColor] - optional custom hex color from UI
  * @returns {React.CSSProperties}
  */
-export function computeEffectStyle(effects, frame, dur) {
+export function computeEffectStyle(effects, frame, dur, regionColor) {
   const t = progress(frame, dur);
   let transformStr = "";
   let filterStr = "";
@@ -246,7 +273,8 @@ export function computeEffectStyle(effects, frame, dur) {
     const yOffset = Math.sin(t * Math.PI * 2) * 15;
     transformStr += ` translateY(${yOffset}px)`;
     const blur = 10 + Math.sin(t * Math.PI * 2) * 5;
-    filterStr += ` drop-shadow(0 0 ${blur}px rgba(120, 200, 255, 0.8))`;
+    const c = regionColor || "rgba(120, 200, 255, 0.8)";
+    filterStr += ` drop-shadow(0 0 ${blur}px ${c})`;
   }
 
   // Slide Left
@@ -284,25 +312,16 @@ export function computeEffectStyle(effects, frame, dur) {
     filterStr += ` hue-rotate(${hue}deg) saturate(1.5)`;
   }
 
-  // 3D Parallax Pan
-  if (effects.includes("parallax")) {
-    // Background moves -30px X and -15px Y.
-    // Character counter-moves slightly to appear closer.
-    const panX = t * 15;
-    const panY = t * 5;
-    transformStr += ` translate(${panX}px, ${panY}px) scale(1.02)`;
-  }
-
   const transforms = [];
   const filters = [];
   let opacity = style.opacity;
 
   for (const key of effects) {
     const entry = REGISTRY[key];
-    if (!entry || entry.kind === "lottie" || ["float-glow", "slide-left", "zoom-in", "shake", "rainbow", "parallax"].includes(key)) {
+    if (!entry || entry.kind === "lottie" || ["float-glow", "slide-left", "zoom-in", "shake", "rainbow"].includes(key)) {
       continue;
     }
-    const result = entry.compute(frame, dur);
+    const result = entry.compute(frame, dur, regionColor);
     if (result.transform) transforms.push(result.transform);
     if (result.filter) filters.push(result.filter);
     if (result.opacity !== undefined) opacity *= result.opacity;
@@ -310,6 +329,84 @@ export function computeEffectStyle(effects, frame, dur) {
 
   if (transformStr) transforms.push(transformStr.trim());
   if (filterStr) filters.push(filterStr.trim());
+
+  return {
+    ...(transforms.length ? { transform: transforms.join(" ") } : {}),
+    ...(filters.length ? { filter: filters.join(" ") } : {}),
+    opacity,
+  };
+}
+
+/**
+ * Motion for a SAM character cut-out.
+ *
+ * Uniform scale() on a person PNG stretches the face (eyes/mouth drift).
+ * Characters only get rigid translation; lighting/opacity still apply.
+ * Zoom is skipped on purpose — it is a card effect, not a head warp.
+ */
+export function computeCharacterEffectStyle(effects, frame, dur) {
+  const t = progress(frame, dur);
+  const w = wave(frame, dur);
+  const transforms = [];
+  const filters = [];
+  let opacity = 1;
+  let ty = 0;
+  let tx = 0;
+
+  if (effects.includes("float") || effects.includes("float-glow")) {
+    ty += interpolate(t, [0, 0.5, 1], [0, -5, 0], {
+      easing: Easing.inOut(Easing.sin),
+      extrapolateLeft: "clamp",
+      extrapolateRight: "clamp",
+    });
+  }
+  if (effects.includes("breathe")) {
+    ty += interpolate(w, [0, 1], [0, -2.5], {
+      extrapolateLeft: "clamp",
+      extrapolateRight: "clamp",
+    });
+  }
+  if (effects.includes("bounce")) {
+    const cycle = t % (1 / 3);
+    ty += -Math.abs(Math.sin(cycle * 3 * Math.PI)) * 8;
+  }
+  if (effects.includes("wave")) {
+    tx += interpolate(t, [0, 0.25, 0.75, 1], [0, 6, -6, 0], {
+      easing: Easing.inOut(Easing.sin),
+      extrapolateLeft: "clamp",
+      extrapolateRight: "clamp",
+    });
+  }
+  if (effects.includes("shake") && t < 0.2) {
+    const shakeAmt = (0.2 - t) * 40;
+    tx += Math.sin(t * 100) * shakeAmt;
+    ty += Math.cos(t * 110) * shakeAmt;
+  }
+  if (tx || ty) {
+    transforms.push(`translate(${tx}px, ${ty}px)`);
+  }
+
+  if (effects.includes("float-glow")) {
+    const blur = 10 + Math.sin(t * Math.PI * 2) * 5;
+    filters.push(`drop-shadow(0 0 ${blur}px rgba(120, 200, 255, 0.8))`);
+  }
+  if (effects.includes("rainbow")) {
+    const hue = Math.floor((t * 360 * 2) % 360);
+    filters.push(`hue-rotate(${hue}deg) saturate(1.5)`);
+  }
+
+  const lightingSkip = new Set([
+    "float", "float-glow", "breathe", "zoom", "zoom-in", "bounce",
+    "shake", "wave", "spin", "slide-left", "parallax", "sparkle",
+  ]);
+  for (const key of effects) {
+    if (lightingSkip.has(key)) continue;
+    const entry = REGISTRY[key];
+    if (!entry || entry.kind === "lottie") continue;
+    const result = entry.compute(frame, dur);
+    if (result.filter) filters.push(result.filter);
+    if (result.opacity !== undefined) opacity *= result.opacity;
+  }
 
   return {
     ...(transforms.length ? { transform: transforms.join(" ") } : {}),

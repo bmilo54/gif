@@ -3,8 +3,11 @@ import os
 import shutil
 import tempfile
 
+import cv2
+import numpy as np
 from django.conf import settings
 from django.core.files.base import ContentFile
+from PIL import Image
 
 from apps.projects.services.preprocessing import load_preprocessed_image
 from apps.projects.services.segmentation import segment_characters
@@ -35,10 +38,6 @@ def _as_region(item):
 
 
 def _regions_payload(detections):
-    """
-    Convert detection objects / region dicts into the canonical list expected
-    by Remotion.  Each region carries its own ``effects`` list.
-    """
     payload = []
     for item in detections:
         det = _as_region(item)
@@ -81,13 +80,25 @@ def _save_job_outputs(job, gif_bytes, video_bytes, frame_count):
     return job
 
 
+def _get_depth_map(image):
+    """Generate a depth map using Depth-Anything. Returns PIL Image or None."""
+    try:
+        from apps.projects.services.depth import get_depth_map
+        return get_depth_map(image)
+    except Exception as e:
+        logger.warning("Depth map generation failed: %s", e)
+        return None
+
+
 def generate_gif(job):
     """
-    Render an AnimationJob.
-
-    Person regions are segmented by SAM 2.1 (transparent-background RGBA PNG).
-    Cards, buttons, titles, and props are animated in Remotion using per-region
-    Lottie / CSS effect lists.
+    Full pipeline:
+      1. Load image
+      2. SAM segment any person/character regions → per-character RGBA PNGs
+      3. Inpaint their area from the background
+      4. Generate Depth-Anything depth map for the inpainted background
+      5. Render via Remotion (WebGL depth shader + CSS effects per region)
+      6. Encode as GIF
     """
     if not isinstance(job, AnimationJob):
         job = AnimationJob.objects.select_related('project').prefetch_related(
@@ -121,39 +132,49 @@ def generate_gif(job):
         try:
             poster_path = os.path.join(tmp, 'poster.png')
             mp4_path = os.path.join(tmp, 'out.mp4')
-            # SAM 2.1 per-character segmentation and combined background mask
-            characters, combined_mask = segment_characters(image, detections, tmp)
+
+            # ── Phase 1: SAM segmentation ──────────────────────────────────
+            characters, combined_mask, unconsumed_regions = segment_characters(
+                image, detections, tmp
+            )
+
+            # Do NOT inpaint the background. cv2.inpaint on large characters
+            # creates terrible blurry smears. We keep the original image intact.
+            # Lighting effects (glow, rim) on characters will overlay perfectly.
+            background = image.convert('RGB')
+            background.save(poster_path, format='PNG')
             
             if characters:
-                import cv2
-                import numpy as np
-                from PIL import Image
-
-                # Convert PIL image to OpenCV BGR format
-                img_cv = cv2.cvtColor(np.array(image.convert('RGB')), cv2.COLOR_RGB2BGR)
-                mask_cv = np.array(combined_mask)
-
-                # Dilate the mask slightly to ensure edges are cleanly inpainted
-                kernel = np.ones((5, 5), np.uint8)
-                mask_cv = cv2.dilate(mask_cv, kernel, iterations=2)
-
-                # Inpaint the background to remove characters
-                inpainted = cv2.inpaint(img_cv, mask_cv, 5, cv2.INPAINT_TELEA)
-
-                # Save the inpainted background as the poster
-                inpainted_pil = Image.fromarray(cv2.cvtColor(inpainted, cv2.COLOR_BGR2RGB))
-                inpainted_pil.save(poster_path)
-
-                logger.info(
-                    'Segmented %d character(s) and inpainted background for job %s',
-                    len(characters), job.pk,
-                )
+                logger.info('Segmented %d character(s) for job %s', len(characters), job.pk)
             else:
-                image.convert('RGB').save(poster_path)
-                logger.info('No person regions found; skipping character segmentation.')
+                logger.info('No person regions found.')
 
-            regions_payload = _regions_payload(detections)
+            # ── Phase 2: Depth Map ─────────────────────────────────────────
+            depth_path = None
+            depth_pil = _get_depth_map(background)
+            if depth_pil is not None:
+                depth_path = os.path.join(tmp, 'depth.png')
+                depth_pil.save(depth_path, format='PNG')
+                logger.info('Depth map generated for job %s', job.pk)
 
+            # ── Phase 3: Build region/character payloads ───────────────────
+            if characters:
+                regions_payload = _regions_payload(unconsumed_regions)
+            else:
+                regions_payload = _regions_payload(detections)
+
+            characters_payload = [
+                {
+                    'src': f'char_{c.character_index}.png',
+                    'index': c.character_index,
+                    'bbox': c.bbox_norm,
+                    'effects': c.effects,
+                    'color': c.source_region.get('color'),
+                }
+                for c in characters
+            ]
+
+            # ── Phase 4: Remotion render ───────────────────────────────────
             render_promo_video(
                 poster_path,
                 regions=regions_payload,
@@ -162,14 +183,18 @@ def generate_gif(job):
                 fps=fps,
                 frame_count=frame_count,
                 output_mp4=mp4_path,
-                characters=characters,
+                characters=characters_payload,
+                depth_map_path=depth_path,
             )
+
             with open(mp4_path, 'rb') as handle:
                 video_bytes = handle.read()
             gif_bytes = encode_gif_from_video(mp4_path, fps)
             return _save_job_outputs(job, gif_bytes, video_bytes, frame_count)
+
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
     except Exception:
         job.status = STATUS_FAILED
         job.save(update_fields=['status'])

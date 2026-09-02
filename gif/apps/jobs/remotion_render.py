@@ -50,22 +50,23 @@ def render_promo_video(
     frame_count,
     output_mp4,
     characters=None,
+    depth_map_path=None,
 ):
     """
     Render the Promo composition with local Remotion (no AWS).
 
-    Parameters
-    ----------
-    poster_path:
-        Full-image PNG used as the static background layer.
-    regions:
-        List of region dicts, each carrying its own ``effects`` list.
-        Non-person regions (card, button, ocr …) are rendered as Lottie /
-        CSS overlay layers inside Remotion.
-    characters:
-        Optional list of ``CharacterLayer`` objects returned by
-        ``segment_characters()``.  Each character is a per-person RGBA PNG
-        (transparent background) that Remotion composites on top of the poster.
+    Args:
+        poster_path:    Absolute path to the background PNG (inpainted if SAM ran).
+        regions:        List of UI region dicts (card, button, ocr, title ...).
+        characters:     List of character dicts with keys:
+                          src, index, bbox {x,y,width,height}, effects [...]
+                        Each src is a basename like 'char_0.png' that must sit
+                        next to poster_path in the same tmp directory.
+        depth_map_path: Absolute path to depth.png, or None.
+        width/height:   Canvas dimensions in pixels.
+        fps:            Frames per second.
+        frame_count:    Total frames to render.
+        output_mp4:     Destination path for the rendered MP4.
     """
     if not remotion_available():
         raise RuntimeError(
@@ -76,29 +77,42 @@ def render_promo_video(
     output_mp4 = Path(output_mp4)
     output_mp4.parent.mkdir(parents=True, exist_ok=True)
 
+    # ── Copy assets into Remotion public/ ─────────────────────────────────────
     public_id = f'renders/{uuid.uuid4().hex}'
     public_dir = project / 'public' / public_id.replace('/', os.sep)
     public_dir.mkdir(parents=True, exist_ok=True)
+
     shutil.copyfile(poster_path, public_dir / 'poster.png')
 
-    # Copy each character mask PNG into Remotion's public dir
-    characters_prop = []
+    # Characters: copy each char_N.png into public dir
+    characters_payload = []
     for char in (characters or []):
-        src = char.mask_png_path
-        if src and os.path.exists(src):
-            fname = f'char_{char.character_index}.png'
-            shutil.copyfile(src, public_dir / fname)
-            characters_prop.append({
-                'src': f'{public_id}/{fname}',
-                'bbox': char.bbox_norm,
-                'effects': list(char.effects),
-                'index': char.character_index,
+        src_name = char.get('src', '')
+        src_path = Path(poster_path).parent / src_name
+        if src_path.exists():
+            shutil.copyfile(src_path, public_dir / src_name)
+            characters_payload.append({
+                'src': f'{public_id}/{src_name}',
+                'index': char.get('index', 0),
+                'bbox': char.get('bbox', {}),
+                'effects': char.get('effects', []),
+                'color': char.get('color'),
             })
+        else:
+            logger.warning('Character asset not found, skipping: %s', src_path)
 
+    # Depth map
+    depth_map_prop = None
+    if depth_map_path and Path(depth_map_path).exists():
+        shutil.copyfile(depth_map_path, public_dir / 'depth.png')
+        depth_map_prop = f'{public_id}/depth.png'
+
+    # ── Build props JSON ───────────────────────────────────────────────────────
     props = {
         'poster': f'{public_id}/poster.png',
+        'depthMap': depth_map_prop,
         'regions': list(regions or []),
-        'characters': characters_prop,
+        'characters': characters_payload,
         'width': int(width),
         'height': int(height),
         'fps': int(round(fps)),

@@ -241,9 +241,18 @@ LOGGING = {
 # Detection Settings
 # Backends are swappable so the pipeline can run without the multi-gigabyte
 # ML stack installed. Switch to 'yolo' / 'paddle' once those are available.
-DETECTION_OBJECT_BACKEND = 'yolo'
-DETECTION_TEXT_BACKEND = 'paddle'
-DETECTION_MIN_CONFIDENCE = 0.15
+DETECTION_OBJECT_BACKEND = os.environ.get('DETECTION_OBJECT_BACKEND', 'gpt4o')
+DETECTION_TEXT_BACKEND = os.environ.get('DETECTION_TEXT_BACKEND', 'google')
+
+# API Keys
+GOOGLE_APPLICATION_CREDENTIALS = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', '')
+if GOOGLE_APPLICATION_CREDENTIALS:
+    import os
+    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = GOOGLE_APPLICATION_CREDENTIALS
+
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
+
+DETECTION_MIN_CONFIDENCE = 0.08
 DETECTION_IOU_THRESHOLD = 0.9
 
 YOLO_MODEL = os.path.join(BASE_DIR, 'ml_models', 'yolov8s.pt')
@@ -269,6 +278,25 @@ SAM_PROP_CONCEPTS = [
     'roulette wheel',
     'poker chip',
 ]
+
+# ---------------------------------------------------------------------------
+# YOLO-World open-vocabulary CHARACTER detection.
+# Runs after standard YOLO so cartoon / anime / 3D characters are also boxed.
+# ---------------------------------------------------------------------------
+CHARACTER_DETECTION_ENABLED = True
+CHARACTER_MIN_CONFIDENCE = 0.12   # lower than YOLO to catch stylised art
+CHARACTER_CONCEPTS = [
+    # Real people (YOLO covers these, but YOLO-World picks up edge cases)
+    'person', 'man', 'woman', 'girl', 'boy',
+    # Cartoon / 2D
+    'cartoon character', 'anime character', 'anime girl', 'anime boy',
+    # 3-D rendered / game art
+    '3D character', 'game character', 'game hero', 'video game character',
+    # Mascots & chibi
+    'mascot', 'chibi character', 'illustrated character',
+    # Generic catch-all
+    'character', 'hero', 'villain',
+]
 PADDLEOCR_LANG = 'en'
 
 # paddlepaddle 3.3.1 on CPU crashes inside the oneDNN text-detection kernel
@@ -291,14 +319,13 @@ PADDLEOCR_USE_TEXTLINE_ORIENTATION = False
 # GIF generation. Boxes are normalised, so downscaling the source here only
 # affects output file size, not the selected regions.
 GIF_MAX_SIDE = 720
-GIF_FRAME_COUNT = 32
-GIF_DURATION_MS = 50
+GIF_FRAME_COUNT = 60   # 2-second loop at 30 fps
+GIF_DURATION_MS = 33   # ≈ 30 fps — enough for all sin-wave effects to complete cleanly
 GIF_GLOW = 0.35
 GIF_SHINE_WIDTH = 0.18
 GIF_FEATHER = 10
 
-# Remotion renders the still poster plus per-region Lottie / CSS overlays.
-# SAM 2.1 segments character regions into transparent-bg PNGs for compositing.
+# Remotion overlays light on the original poster. Person pixels are not warped.
 ANIMATION_RENDERER = 'remotion'
 REMOTION_DIR = os.path.join(os.path.dirname(BASE_DIR), 'remotion')
 

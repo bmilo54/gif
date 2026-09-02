@@ -240,7 +240,16 @@
         const width = x2 - x1;
         const height = y2 - y1;
         if (width >= 0.02 && height >= 0.02) {
-            manualRegions.push({ x: x1, y: y1, width: width, height: height });
+            const isPerson = window.confirm(
+                'Is this region a Person / Character?\n\n' +
+                '  OK     → Character (SAM will cut out the background)\n' +
+                '  Cancel → UI element (card, button, etc.)'
+            );
+            manualRegions.push({
+                source: 'manual',
+                label: isPerson ? 'person' : 'manual region',
+                x: x1, y: y1, width: width, height: height,
+            });
             syncForm();
         }
         draw();

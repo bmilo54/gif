@@ -117,9 +117,15 @@ def segment_box(image, box_xyxy):
             device=_device(),
         )
     except Exception:
-        logger.exception('SAM box predict failed')
+        logger.exception('SAM box predict failed for box [%s %s %s %s]', x1, y1, x2, y2)
         return None
-    if not results or results[0].masks is None:
+    if not results:
+        logger.warning('SAM predict returned empty results for box [%s %s %s %s]', x1, y1, x2, y2)
+        return None
+    if results[0].masks is None or len(results[0].masks.data) == 0:
+        logger.warning('SAM predict returned no masks for box [%s %s %s %s] — '
+                       'image shape=%s, box area=%dpx',
+                       x1, y1, x2, y2, array.shape, int((x2-x1)*(y2-y1)))
         return None
     mask = results[0].masks.data[0]
     if hasattr(mask, 'cpu'):
@@ -130,8 +136,12 @@ def segment_box(image, box_xyxy):
         mask = np.array(
             Image.fromarray(mask, mode='L').resize((width, height), Image.Resampling.NEAREST),
         )
-    if mask.mean() < 4:
+    mask_area_px = mask.sum() / 255.0
+    if mask_area_px < 50:
+        logger.warning('SAM mask is nearly empty (area=%dpx) for box [%s %s %s %s]',
+                       int(mask_area_px), x1, y1, x2, y2)
         return None
+    logger.info('SAM mask OK for box [%s %s %s %s], area=%dpx', x1, y1, x2, y2, int(mask_area_px))
     return mask
 
 
@@ -291,75 +301,145 @@ def _norm_box(x1, y1, x2, y2, img_w, img_h) -> dict:
 
 
 def segment_characters(image, regions: list, tmp_dir: str):
-    """
-    Produce one RGBA PNG per person region.
-
-    For each region whose source is 'yolo' / 'sam' or whose label contains
-    'person', this function runs SAM 2.1 box-prompted segmentation and saves
-    the masked crop as ``char_N.png`` inside *tmp_dir*.  Non-person regions
-    are skipped (they are rendered as UI overlays directly in Remotion).
-
-    Falls back to a rectangular RGBA crop when SAM is unavailable.
-
-    Parameters
-    ----------
-    image:
-        Full PIL image (any mode).
-    regions:
-        List of region dicts with normalised 0-1 coordinates, each optionally
-        carrying an ``effects`` list.
-    tmp_dir:
-        Writable directory for the PNG files.
-
-    Returns
-    -------
-    List[CharacterLayer]
-    """
     import os
     import numpy as _np
+    import cv2 as _cv2
     from PIL import Image as _Image
 
     img_rgb = image.convert('RGB')
     img_w, img_h = img_rgb.size
     layers: _List[CharacterLayer] = []
     
-    # Track all characters in a combined mask for background inpainting
     bg_mask = _np.zeros((img_h, img_w), dtype=_np.uint8)
 
-    char_idx = 0
-    for region in regions:
-        if not _is_person_region(region):
+    # 1. Separate persons and props
+    person_regions = [r for r in regions if _is_person_region(r)]
+    other_regions = [r for r in regions if not _is_person_region(r)]
+    logger.info('segment_characters: %d person regions, %d other regions',
+                len(person_regions), len(other_regions))
+    for r in regions:
+        logger.info('  region source=%r label=%r is_person=%s',
+                    r.get('source'), r.get('label'), _is_person_region(r))
+    
+    # 2. Assign each prop to the person whose box overlaps it the MOST.
+    #    Using best-overlap (not first-hit) prevents a prop on the right
+    #    from being stolen by the middle person that barely touches it.
+    consumed_prop_ids = set()
+    person_to_props = {i: [] for i in range(len(person_regions))}
+
+    # Pre-compute pixel boxes for all persons
+    person_boxes = [_pixel_box_padded(p, img_w, img_h) for p in person_regions]
+
+    for j, o_reg in enumerate(other_regions):
+        is_explicit_prop = o_reg.get('source') == 'prop'
+        is_auto_prop = o_reg.get('label', '').lower() in (
+            'prop', 'pill', 'coin', 'dragon', 'gift', 'star', 'badge', 'chest'
+        )
+        if not is_explicit_prop and not is_auto_prop:
             continue
 
+        ox1, oy1, ox2, oy2 = _pixel_box_padded(o_reg, img_w, img_h)
+
+        best_person = -1
+        best_area = 0
+        for i, (px1, py1, px2, py2) in enumerate(person_boxes):
+            ix1 = max(px1, ox1); iy1 = max(py1, oy1)
+            ix2 = min(px2, ox2); iy2 = min(py2, oy2)
+            if ix2 > ix1 and iy2 > iy1:
+                i_area = (ix2 - ix1) * (iy2 - iy1)
+                if i_area > best_area:
+                    best_area = i_area
+                    best_person = i
+
+        if best_person >= 0:
+            logger.info('  Assigning prop source=%r label=%r to person %d (overlap=%dpx²)',
+                        o_reg.get('source'), o_reg.get('label'), best_person, best_area)
+            person_to_props[best_person].append(o_reg)
+            consumed_prop_ids.add(id(o_reg))
+
+    unconsumed_regions = [r for r in other_regions if id(r) not in consumed_prop_ids]
+
+    char_idx = 0
+    for i, region in enumerate(person_regions):
         x1, y1, x2, y2 = _pixel_box_padded(region, img_w, img_h)
         effects = list(region.get('effects') or [])
 
         # --- try SAM mask ---
         mask_np = segment_box(img_rgb, [x1, y1, x2, y2])
+        
+        # Merge assigned props
+        assigned_props = person_to_props[i]
+        if mask_np is not None and assigned_props:
+            for prop in assigned_props:
+                px1, py1, px2, py2 = _pixel_box_padded(prop, img_w, img_h)
+                prop_mask = segment_box(img_rgb, [px1, py1, px2, py2])
+                if prop_mask is None:
+                    # SAM failed for small prop (e.g., coin).
+                    # Fallback: draw a soft ellipse (better than a rect to avoid sharp background tearing)
+                    logger.info('  Prop SAM failed for prop at [%d %d %d %d] — using soft ellipse fallback', px1, py1, px2, py2)
+                    prop_mask = _np.zeros((img_h, img_w), dtype=_np.uint8)
+                    center = ((px1 + px2) // 2, (py1 + py2) // 2)
+                    axes = ((px2 - px1) // 2, (py2 - py1) // 2)
+                    _cv2.ellipse(prop_mask, center, axes, 0, 0, 360, 255, -1)
+                    prop_mask = _cv2.GaussianBlur(prop_mask, (11, 11), 0)
+
+                # Merge prop mask into character mask and expand bounding box
+                mask_np = _np.maximum(mask_np, prop_mask)
+                x1 = min(x1, px1)
+                y1 = min(y1, py1)
+                x2 = max(x2, px2)
+                y2 = max(y2, py2)
 
         if mask_np is not None:
-            # Apply mask to full image then crop
+            # --- Step 1: Minimal edge erosion (just removes 1-2px SAM fringe) ---
+            erode_kernel = _np.ones((2, 2), _np.uint8)
+            mask_clean = _cv2.erode(mask_np, erode_kernel, iterations=1)
+
+            # --- Step 2: Minimal feathering only (7px) ---
+            # Heavy feathering creates semi-transparent edges that reveal the background
+            # person underneath, causing a "ghost / soul-leaving-body" double image.
+            mask_feathered = _cv2.GaussianBlur(mask_clean, (7, 7), 0)
+
+            # Apply feathered mask to full image then crop
             rgba = img_rgb.convert('RGBA')
             r, g, b, a = rgba.split()
-            alpha_ch = _Image.fromarray(mask_np, mode='L')
+            alpha_ch = _Image.fromarray(mask_feathered, mode='L')
             rgba_masked = _Image.merge('RGBA', (r, g, b, alpha_ch))
-            crop = rgba_masked.crop((x1, y1, x2, y2))
             
-            # Combine into background mask
-            # Ensure mask_np has the correct shape for assignment
+            # Crop exactly to the non-transparent pixels (this includes the feathered bleed)
+            # rather than the user's original box which might artificially cut off the blur.
+            actual_bbox = alpha_ch.getbbox()
+            if actual_bbox:
+                crop = rgba_masked.crop(actual_bbox)
+                cx1, cy1, cx2, cy2 = actual_bbox
+            else:
+                crop = rgba_masked.crop((x1, y1, x2, y2))
+                cx1, cy1, cx2, cy2 = x1, y1, x2, y2
+
             mh, mw = mask_np.shape[:2]
-            # Since segment_box might return a mask of size (img_h, img_w) if it was resized correctly,
-            # we just check shapes and use maximum.
             if mh == img_h and mw == img_w:
                 bg_mask = _np.maximum(bg_mask, mask_np)
             
-            logger.info('Character %d: SAM mask crop (%dx%d)', char_idx, x2 - x1, y2 - y1)
+            logger.info('Character %d: SAM mask crop (%dx%d) with %d props', char_idx, cx2 - cx1, cy2 - cy1, len(assigned_props))
         else:
-            # Rect fallback
+            # Rect fallback with soft edges so it's not a sharp box
             crop = img_rgb.convert('RGBA').crop((x1, y1, x2, y2))
-            # Fill the fallback rectangle in the background mask
-            bg_mask[y1:y2, x1:x2] = 255
+            cx1, cy1, cx2, cy2 = x1, y1, x2, y2
             
+            # Create a rounded feathered mask for the fallback crop
+            w, h = crop.size
+            fallback_mask = _Image.new('L', (w, h), 0)
+            from PIL import ImageDraw, ImageFilter
+            draw = ImageDraw.Draw(fallback_mask)
+            # Draw a rounded rectangle mask with feathering
+            draw.rounded_rectangle((10, 10, w - 10, h - 10), radius=20, fill=255)
+            fallback_mask = fallback_mask.filter(ImageFilter.GaussianBlur(10))
+            
+            # Apply it to crop's alpha channel
+            r, g, b, a = crop.split()
+            crop = _Image.merge('RGBA', (r, g, b, fallback_mask))
+            
+            bg_mask[y1:y2, x1:x2] = 255
             logger.info('Character %d: rect RGBA crop (%dx%d)', char_idx, x2 - x1, y2 - y1)
 
         mask_path = os.path.join(tmp_dir, f'char_{char_idx}.png')
@@ -367,11 +447,11 @@ def segment_characters(image, regions: list, tmp_dir: str):
 
         layers.append(CharacterLayer(
             mask_png_path=mask_path,
-            bbox_norm=_norm_box(x1, y1, x2, y2, img_w, img_h),
+            bbox_norm=_norm_box(cx1, cy1, cx2, cy2, img_w, img_h),
             character_index=char_idx,
             effects=effects,
             source_region=region,
         ))
         char_idx += 1
 
-    return layers, _Image.fromarray(bg_mask, mode='L')
+    return layers, _Image.fromarray(bg_mask, mode='L'), unconsumed_regions

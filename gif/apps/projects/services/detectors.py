@@ -107,6 +107,97 @@ class YoloObjectDetector:
         return detections
 
 
+class YoloWorldCharacterDetector:
+    """
+    Open-vocabulary character detector backed by YOLO-World.
+
+    Finds real people, cartoon characters, anime heroes, 3D-rendered avatars,
+    mascots — anything described by the configurable CHARACTER_CONCEPTS list in
+    settings — and returns them with source=SOURCE_YOLO and label='person' so
+    the rest of the pipeline (SAM segmentation, inpainting) treats them as
+    character layers.
+    """
+
+    def __init__(self, model_path=None):
+        self.model_path = model_path or getattr(
+            settings, 'YOLOWORLD_MODEL',
+            'yolov8s-worldv2.pt',
+        )
+        self._model = None
+
+    def _load(self):
+        if self._model is None:
+            try:
+                from ultralytics import YOLOWorld
+            except ImportError as exc:
+                raise ImproperlyConfigured(
+                    "YoloWorldCharacterDetector requires ultralytics with YOLOWorld support."
+                ) from exc
+            self._model = YOLOWorld(self.model_path)
+        return self._model
+
+    def __call__(self, image):
+        concepts = list(getattr(settings, 'CHARACTER_CONCEPTS', [
+            'person',
+            'man',
+            'woman',
+            'character',
+            'cartoon character',
+            'anime character',
+            '3D character',
+            'mascot',
+            'game character',
+            'hero',
+        ]))
+        if not concepts:
+            return []
+
+        model = self._load()
+        model.set_classes(concepts)
+
+        width, height = image.size
+        import numpy as np
+        from PIL import Image as _PILImage
+        array = np.asarray(image.convert('RGB'))
+
+        min_conf = getattr(settings, 'CHARACTER_MIN_CONFIDENCE', 0.18)
+        try:
+            results = model.predict(
+                array,
+                verbose=False,
+                conf=min_conf,
+                iou=0.5,
+            )
+        except Exception:
+            import logging as _logging
+            _logging.getLogger(__name__).exception('YOLOWorld character detection failed')
+            return []
+
+        detections = []
+        for result in results:
+            boxes = result.boxes
+            if boxes is None:
+                continue
+            xyxy = boxes.xyxy
+            confs = boxes.conf
+            if hasattr(xyxy, 'cpu'):
+                xyxy = xyxy.cpu().numpy()
+                confs = confs.cpu().numpy()
+            for coords, conf in zip(xyxy, confs):
+                x1, y1, x2, y2 = (float(v) for v in coords)
+                detections.append(Detection(
+                    # Always label as 'person' so _is_person_region() recognises it
+                    label='person',
+                    confidence=float(conf),
+                    source=SOURCE_YOLO,
+                    x=x1 / width,
+                    y=y1 / height,
+                    width=(x2 - x1) / width,
+                    height=(y2 - y1) / height,
+                ))
+        return detections
+
+
 class PaddleTextDetector:
     def __init__(self, lang=None, enable_mkldnn=None):
         self.lang = lang or settings.PADDLEOCR_LANG
@@ -228,14 +319,177 @@ class PaddleTextDetector:
                 yield polygon, text, score
 
 
+class GoogleVisionTextDetector:
+    def __init__(self):
+        self._client = None
+
+    def _load(self):
+        if self._client is None:
+            try:
+                from google.cloud import vision
+            except ImportError as exc:
+                raise ImproperlyConfigured("Install google-cloud-vision to use GoogleVisionTextDetector") from exc
+            
+            creds = getattr(settings, 'GOOGLE_APPLICATION_CREDENTIALS', '')
+            if creds:
+                import os
+                os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = creds
+                
+            self._client = vision.ImageAnnotatorClient()
+            self._vision = vision
+        return self._client, self._vision
+
+    def __call__(self, image):
+        import io
+        client, vision = self._load()
+        
+        # Convert PIL to bytes
+        img_byte_arr = io.BytesIO()
+        image.convert('RGB').save(img_byte_arr, format='JPEG')
+        content = img_byte_arr.getvalue()
+        
+        v_image = vision.Image(content=content)
+        response = client.text_detection(image=v_image)
+        
+        if response.error.message:
+            raise Exception(f"{response.error.message}")
+            
+        detections = []
+        width, height = image.size
+        
+        # The first text annotation contains the entire text, skip it
+        for i, text_annot in enumerate(response.text_annotations):
+            if i == 0:
+                continue
+            text = text_annot.description
+            vertices = text_annot.bounding_poly.vertices
+            
+            # Get bounding box
+            xs = [v.x for v in vertices]
+            ys = [v.y for v in vertices]
+            x1, x2 = min(xs), max(xs)
+            y1, y2 = min(ys), max(ys)
+            
+            box_w = max(x2 - x1, 1.0)
+            box_h = max(y2 - y1, 1.0)
+            pad_x = max(width * 0.004, box_w * 0.10)
+            pad_y = max(height * 0.004, box_h * 0.20)
+            
+            x1 = max(0.0, x1 - pad_x)
+            y1 = max(0.0, y1 - pad_y)
+            x2 = min(float(width), x2 + pad_x)
+            y2 = min(float(height), y2 + pad_y)
+            
+            detections.append(Detection(
+                label=text,
+                confidence=1.0,
+                source=SOURCE_OCR,
+                x=x1 / width,
+                y=y1 / height,
+                width=(x2 - x1) / width,
+                height=(y2 - y1) / height,
+                text_content=text,
+            ))
+            
+        return detections
+
+
+class GPT4VisionCharacterDetector:
+    def __init__(self):
+        self._client = None
+
+    def _load(self):
+        if self._client is None:
+            try:
+                from openai import OpenAI
+            except ImportError as exc:
+                raise ImproperlyConfigured("Install openai to use GPT4VisionCharacterDetector") from exc
+            self._client = OpenAI(api_key=getattr(settings, 'OPENAI_API_KEY', None))
+        return self._client
+
+    def __call__(self, image):
+        import base64
+        import io
+        import json
+        client = self._load()
+        
+        # Convert PIL to base64
+        img_byte_arr = io.BytesIO()
+        image.convert('RGB').save(img_byte_arr, format='JPEG', quality=85)
+        base64_image = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
+        
+        width, height = image.size
+        
+        prompt = (
+            f"Image dimensions: {width}x{height} pixels.\n"
+            "Identify the main characters (people, cartoon heroes, mascots, 3D models) and any props they hold (coins, weapons, gifts).\n"
+            "Return a JSON array of objects. Each object must have:\n"
+            "- 'label': 'person' for characters, or the prop name for props.\n"
+            "- 'box': [x_min, y_min, x_max, y_max] in absolute pixels.\n"
+            "Output ONLY the JSON array, no markdown formatting."
+        )
+        
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+                        }
+                    ]
+                }
+            ],
+            max_tokens=500
+        )
+        
+        content = response.choices[0].message.content.strip()
+        if content.startswith("```json"):
+            content = content[7:-3]
+            
+        try:
+            results = json.loads(content)
+        except json.JSONDecodeError:
+            import logging
+            logging.getLogger(__name__).error("GPT-4o Vision returned invalid JSON: %s", content)
+            return []
+            
+        detections = []
+        for res in results:
+            label = res.get('label', 'person')
+            box = res.get('box')
+            if not box or len(box) != 4:
+                continue
+            x1, y1, x2, y2 = box
+            
+            # Normalize to 0-1
+            detections.append(Detection(
+                label=label,
+                confidence=0.99,
+                source=SOURCE_YOLO,  # Keep SOURCE_YOLO so pipeline treats it as character
+                x=x1 / width,
+                y=y1 / height,
+                width=(x2 - x1) / width,
+                height=(y2 - y1) / height,
+            ))
+            
+        return detections
+
+
 OBJECT_BACKENDS = {
     'stub': StubObjectDetector,
     'yolo': YoloObjectDetector,
+    'yolo-world': YoloWorldCharacterDetector,
+    'gpt4o': GPT4VisionCharacterDetector,
 }
 
 TEXT_BACKENDS = {
     'stub': StubTextDetector,
     'paddle': PaddleTextDetector,
+    'google': GoogleVisionTextDetector,
 }
 
 
@@ -256,6 +510,21 @@ def _build(registry, name, setting_name):
 def get_object_detector():
     return _build(OBJECT_BACKENDS, settings.DETECTION_OBJECT_BACKEND, 'DETECTION_OBJECT_BACKEND')
 
+
+@lru_cache(maxsize=None)
+def get_character_detector():
+    """YOLO-World open-vocab character detector (always active when model is present)."""
+    if not getattr(settings, 'CHARACTER_DETECTION_ENABLED', True):
+        return None
+    try:
+        return YoloWorldCharacterDetector()
+    except Exception:
+        import logging as _log
+        _log.getLogger(__name__).warning(
+            'YOLOWorld character detector could not be loaded; '
+            'cartoon/3D characters will not be auto-detected.'
+        )
+        return None
 
 @lru_cache(maxsize=None)
 def get_text_detector():
