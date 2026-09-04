@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}Delete Project | Antigravity GIF{% endblock %}
+
+{% block content %}
+<div style="max-width: 600px; margin: 40px auto; padding: 20px; background: rgba(255, 255, 255, 0.02); border: 1px solid #30363d; border-radius: 12px;">
+    <h2 style="margin-top: 0; color: #ff7b72;">Confirm Deletion</h2>
+    
+    <p>Are you sure you want to delete this project?</p>
+    
+    {% if project.image %}
+        <div style="margin: 20px 0; text-align: center;">
+            <img src="{{ project.image.url }}" alt="Project image" style="max-width: 100%; max-height: 200px; border-radius: 8px; border: 1px solid #30363d;">
+        </div>
+    {% endif %}
+    
+    <div style="background: rgba(255, 123, 114, 0.1); border: 1px solid rgba(255, 123, 114, 0.4); padding: 15px; border-radius: 8px; margin-bottom: 25px;">
+        <p style="margin: 0; color: #ff7b72; font-weight: bold;">⚠️ Warning: This action cannot be undone.</p>
+        <p style="margin: 8px 0 0 0; font-size: 14px; color: #c9d1d9;">Deleting this project will permanently remove:</p>
+        <ul style="margin: 5px 0 0 0; padding-left: 20px; font-size: 14px; color: #c9d1d9;">
+            <li>The original uploaded image</li>
+            <li>All generated versions (MP4s and GIFs)</li>
+            <li>All bounding box data and manual adjustments</li>
+        </ul>
+    </div>
+
+    <form method="post" style="display: flex; gap: 10px; justify-content: flex-end;">
+        {% csrf_token %}
+        <a href="{% url 'projects:project_detail' project.pk %}" class="btn" style="background: transparent; border: 1px solid #30363d; color: #c9d1d9;">Cancel</a>
+        <button type="submit" class="btn" style="background: #da3633; color: white; border: 1px solid #f85149;">Yes, delete project</button>
+    </form>
+</div>
+{% endblock %}

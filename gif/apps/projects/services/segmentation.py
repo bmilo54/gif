@@ -9,6 +9,7 @@ if weights are missing.
 
 from functools import lru_cache
 import logging
+import os
 
 from django.conf import settings
 
@@ -143,6 +144,70 @@ def segment_box(image, box_xyxy):
         return None
     logger.info('SAM mask OK for box [%s %s %s %s], area=%dpx', x1, y1, x2, y2, int(mask_area_px))
     return mask
+
+
+def _segment_box_rembg(image, box_xyxy):
+    """
+    Replicate rembg on the cropped box. Better than full-image automatic SAM
+    for a single ornate card: the crop is small, the marble is treated as
+    background, the gold plaque + crown stay in the alpha channel.
+    """
+    import base64
+    import io
+    import numpy as np
+    from PIL import Image as _Image
+
+    token = getattr(settings, 'REPLICATE_API_TOKEN', '')
+    model = getattr(settings, 'REPLICATE_CUTOUT_MODEL', '')
+    if not token or not model:
+        return None
+    try:
+        import replicate
+    except ImportError:
+        return None
+
+    os.environ['REPLICATE_API_TOKEN'] = token
+    width, height = image.size
+    x1, y1, x2, y2 = [int(round(v)) for v in box_xyxy]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(width, x2), min(height, y2)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    crop = image.convert('RGB').crop((x1, y1, x2, y2))
+    buf = io.BytesIO()
+    crop.save(buf, format='PNG')
+    data_uri = 'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode('ascii')
+    try:
+        output = replicate.run(model, input={'image': data_uri})
+    except Exception:
+        logger.exception('Replicate rembg cut-out failed')
+        return None
+
+    raw = output
+    if hasattr(output, 'read'):
+        raw = output.read()
+    elif isinstance(output, list) and output:
+        raw = output[0]
+        if hasattr(raw, 'read'):
+            raw = raw.read()
+        elif isinstance(raw, str) and raw.startswith('http'):
+            import urllib.request
+            with urllib.request.urlopen(raw, timeout=60) as resp:
+                raw = resp.read()
+    if isinstance(raw, str) and raw.startswith('data:'):
+        raw = base64.b64decode(raw.split(',', 1)[-1])
+    if not isinstance(raw, (bytes, bytearray)):
+        return None
+    cut = _Image.open(io.BytesIO(raw)).convert('RGBA')
+    if cut.size != crop.size:
+        cut = cut.resize(crop.size, _Image.Resampling.LANCZOS)
+    alpha = np.array(cut.split()[-1])
+    if (alpha > 16).sum() < 50:
+        return None
+    full = np.zeros((height, width), dtype=np.uint8)
+    full[y1:y2, x1:x2] = alpha
+    logger.info('Replicate rembg mask OK for box [%s %s %s %s]', x1, y1, x2, y2)
+    return full
 
 
 def _detections_from_boxes(boxes, names, source, width, height):
@@ -455,3 +520,164 @@ def segment_characters(image, regions: list, tmp_dir: str):
         char_idx += 1
 
     return layers, _Image.fromarray(bg_mask, mode='L'), unconsumed_regions
+
+
+_UI_CUTOUT_SOURCES = {'card', 'button', 'title'}
+_PIXEL_MOTION = {
+    'float', 'float-glow', 'breathe', 'natural-breathe', 'zoom', 'zoom-in',
+    'bounce', 'shake', 'wave', 'spin', 'slide-left', 'slide-up',
+}
+
+
+def _wants_pixel_motion(region: dict) -> bool:
+    return any(key in _PIXEL_MOTION for key in (region.get('effects') or []))
+
+
+def _mask_fill_ratio(mask, x1, y1, x2, y2):
+    import numpy as np
+    patch = mask[y1:y2, x1:x2]
+    if patch.size == 0:
+        return 1.0
+    return float((patch > 127).mean())
+
+
+def inpaint_masked(image, mask, protect_mask=None):
+    """Fill card holes so a scaled cut-out does not ghost.
+
+    Pixels under a person stay original — inpainting that junction is what
+    painted the dark smear between arm and gold frame.
+    """
+    import cv2
+    import numpy as np
+    from PIL import Image as _Image
+
+    if mask is None:
+        return image.convert('RGB')
+    if hasattr(mask, 'size'):
+        mask = np.array(mask)
+    if mask.max() == 0:
+        return image.convert('RGB')
+    rgb = np.asarray(image.convert('RGB')).copy()
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    kernel = np.ones((5, 5), np.uint8)
+    hole = cv2.dilate(mask, kernel, iterations=1)
+    if protect_mask is not None:
+        protect = np.array(protect_mask) if hasattr(protect_mask, 'size') else protect_mask
+        if protect.shape[:2] == hole.shape[:2] and protect.max() > 0:
+            protect_bin = cv2.dilate(
+                (protect > 16).astype(np.uint8) * 255,
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+                iterations=1,
+            )
+            hole = cv2.bitwise_and(hole, cv2.bitwise_not(protect_bin))
+    if hole.max() == 0:
+        return _Image.fromarray(rgb)
+    filled = cv2.inpaint(bgr, hole, 3, cv2.INPAINT_TELEA)
+    out = cv2.cvtColor(filled, cv2.COLOR_BGR2RGB)
+    if protect_mask is not None:
+        protect = np.array(protect_mask) if hasattr(protect_mask, 'size') else protect_mask
+        if protect.shape[:2] == out.shape[:2]:
+            keep = protect > 16
+            out[keep] = rgb[keep]
+    return _Image.fromarray(out)
+
+
+def _carve_person_from_ui_mask(card_mask, person_mask):
+    """
+    Remove only pixels that are actually on the person.
+
+    A wide dilated halo left a dark gap between the arm and the gold frame.
+    The person layer already sits on top, so a 1px fringe is enough.
+    """
+    import cv2
+    import numpy as np
+
+    if person_mask is None:
+        return card_mask
+    if hasattr(person_mask, 'size'):
+        person_mask = np.array(person_mask)
+    if person_mask.shape[:2] != card_mask.shape[:2] or person_mask.max() == 0:
+        return card_mask
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    keep_out = cv2.dilate((person_mask > 16).astype(np.uint8) * 255, kernel, iterations=1)
+    carved = card_mask.copy()
+    carved[keep_out > 0] = 0
+    return carved
+
+
+def segment_ui_cutouts(image, regions: list, tmp_dir: str, person_mask=None):
+    """
+    SAM (or Replicate rembg) silhouette for ornate cards / buttons / titles.
+
+    Person SAM is not modified. If a person_mask is given, arm overlap is
+    carved out of the card so it does not zoom with the plaque.
+    """
+    import os
+    import numpy as _np
+    import cv2 as _cv2
+    from PIL import Image as _Image
+
+    img_rgb = image.convert('RGB')
+    img_w, img_h = img_rgb.size
+    layers: _List[CharacterLayer] = []
+    combined = _np.zeros((img_h, img_w), dtype=_np.uint8)
+    leftover = []
+    cut_idx = 0
+
+    for region in regions:
+        source = (region.get('source') or '').lower()
+        if source not in _UI_CUTOUT_SOURCES or not _wants_pixel_motion(region):
+            leftover.append(region)
+            continue
+
+        x1, y1, x2, y2 = _pixel_box_padded(region, img_w, img_h, pad=0.03)
+        mask_np = segment_box(img_rgb, [x1, y1, x2, y2])
+        if mask_np is not None and _mask_fill_ratio(mask_np, x1, y1, x2, y2) > 0.93:
+            logger.info('SAM mask is nearly the whole box; trying rembg cut-out')
+            mask_np = None
+        if mask_np is None:
+            mask_np = _segment_box_rembg(img_rgb, [x1, y1, x2, y2])
+        if mask_np is None:
+            leftover.append(region)
+            continue
+
+        mask_np = _carve_person_from_ui_mask(mask_np, person_mask)
+        if (mask_np > 16).sum() < 50:
+            leftover.append(region)
+            continue
+
+        # Keep the plaque interior fully opaque. Blurring the whole mask
+        # made $19 / 69% go soft because inpaint showed through the alpha.
+        mask_bin = (mask_np > 16).astype(_np.uint8) * 255
+        mask_clean = _cv2.erode(mask_bin, _np.ones((2, 2), _np.uint8), iterations=1)
+        rgba = img_rgb.convert('RGBA')
+        r, g, b, _a = rgba.split()
+        alpha_ch = _Image.fromarray(mask_clean, mode='L')
+        rgba_masked = _Image.merge('RGBA', (r, g, b, alpha_ch))
+        actual_bbox = alpha_ch.getbbox()
+        if not actual_bbox:
+            leftover.append(region)
+            continue
+        crop = rgba_masked.crop(actual_bbox)
+        cx1, cy1, cx2, cy2 = actual_bbox
+        combined = _np.maximum(combined, mask_np)
+
+        mask_path = os.path.join(tmp_dir, f'ui_{cut_idx}.png')
+        crop.save(mask_path, format='PNG')
+        layers.append(CharacterLayer(
+            mask_png_path=mask_path,
+            bbox_norm={
+                'x': cx1 / img_w,
+                'y': cy1 / img_h,
+                'width': (cx2 - cx1) / img_w,
+                'height': (cy2 - cy1) / img_h,
+            },
+            character_index=cut_idx,
+            effects=list(region.get('effects') or []),
+            source_region=region,
+        ))
+        logger.info('UI cut-out %d (%s) %dx%d', cut_idx, source, cx2 - cx1, cy2 - cy1)
+        cut_idx += 1
+
+    return layers, _Image.fromarray(combined, mode='L'), leftover
+

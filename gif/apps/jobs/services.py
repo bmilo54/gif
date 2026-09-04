@@ -7,6 +7,19 @@ from apps.projects.choices import SOURCE_MANUAL
 from apps.projects.models import DetectionObject
 
 from .choices import DEFAULT_ANIMATION_TYPES, ANIMATION_TYPE_CHOICES, ANIMATION_TYPE_LABELS
+
+UI_SOURCES = frozenset({'card', 'button', 'title', 'ocr'})
+UI_BLOCKED_MOTION = frozenset({
+    'bounce',
+    'shake',
+    'wave',
+    'spin',
+    'float-glow',
+    'slide-up',
+    'slide-left',
+    'zoom-in',
+    'natural-breathe',
+})
 from .models import AnimationJob
 
 
@@ -108,6 +121,8 @@ def parse_regions(raw):
         # Preserve per-region effects; silently ignore unknown keys.
         raw_effects = item.get('effects') or []
         effects = [e for e in raw_effects if e in allowed_effects]
+        if str(item.get('source') or '').lower() in UI_SOURCES:
+            effects = [e for e in effects if e not in UI_BLOCKED_MOTION]
         color = item.get('color')
         region_data = {
             'key': str(item.get('key') or '')[:64],
@@ -123,6 +138,13 @@ def parse_regions(raw):
 
 
 def snapshot_regions(detections, manual_regions):
+    def _default_effects(label, source):
+        lbl = (label or '').lower()
+        src = (source or '').lower()
+        if src in ('yolo', 'sam') or 'person' in lbl or 'character' in lbl:
+            return ['breathe']
+        return ['zoom', 'shine']
+
     regions = []
     for detection in detections:
         regions.append({
@@ -133,16 +155,14 @@ def snapshot_regions(detections, manual_regions):
             'y': detection.y,
             'width': detection.width,
             'height': detection.height,
-            'effects': [],  # user fills this in on the adjust page
+            'effects': _default_effects(detection.label, detection.source),
         })
     for index, region in enumerate(manual_regions):
         regions.append({
             'key': f'manual-{index}',
-            # Use the label the user set (e.g. 'person') rather than
-            # hardcoding 'Manual region', so _is_person_region() works.
             'label': region.get('label') or 'manual region',
             'source': region.get('source') or SOURCE_MANUAL,
-            'effects': [],
+            'effects': _default_effects(region.get('label'), region.get('source')),
             **{k: v for k, v in region.items() if k in ('x', 'y', 'width', 'height')},
         })
     return regions

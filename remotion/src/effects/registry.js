@@ -49,7 +49,7 @@ const REGISTRY = {
     kind: "motion",
     compute(frame, dur) {
       // One full sin-wave cycle over the clip → perfectly smooth loop
-      const ty = Math.sin((frame / Math.max(dur, 1)) * Math.PI * 2) * -10;
+      const ty = Math.sin((frame / Math.max(dur, 1)) * Math.PI * 2) * -3;
       return { transform: `translateY(${ty}px)` };
     },
   },
@@ -270,7 +270,7 @@ export function computeEffectStyle(effects, frame, dur, regionColor) {
 
   // Float & Glow
   if (effects.includes("float-glow")) {
-    const yOffset = Math.sin(t * Math.PI * 2) * 15;
+    const yOffset = Math.sin(t * Math.PI * 2) * -3;
     transformStr += ` translateY(${yOffset}px)`;
     const blur = 10 + Math.sin(t * Math.PI * 2) * 5;
     const c = regionColor || "rgba(120, 200, 255, 0.8)";

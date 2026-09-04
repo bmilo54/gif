@@ -3,14 +3,15 @@ import os
 import shutil
 import tempfile
 
-import cv2
-import numpy as np
 from django.conf import settings
 from django.core.files.base import ContentFile
-from PIL import Image
 
 from apps.projects.services.preprocessing import load_preprocessed_image
-from apps.projects.services.segmentation import segment_characters
+from apps.projects.services.segmentation import (
+    inpaint_masked,
+    segment_characters,
+    segment_ui_cutouts,
+)
 
 from .encoding import encode_gif_from_video
 from .models import AnimationJob
@@ -49,6 +50,7 @@ def _regions_payload(detections):
             'width': float(det['width']),
             'height': float(det['height']),
             'effects': list(det.get('effects') or []),
+            'color': det.get('color') or None,
         })
     return payload
 
@@ -92,13 +94,8 @@ def _get_depth_map(image):
 
 def generate_gif(job):
     """
-    Full pipeline:
-      1. Load image
-      2. SAM segment any person/character regions → per-character RGBA PNGs
-      3. Inpaint their area from the background
-      4. Generate Depth-Anything depth map for the inpainted background
-      5. Render via Remotion (WebGL depth shader + CSS effects per region)
-      6. Encode as GIF
+    People: existing SAM character layers, original poster (unchanged).
+    Cards: separate UI cut-outs so zoom follows the gold frame, not a rectangle.
     """
     if not isinstance(job, AnimationJob):
         job = AnimationJob.objects.select_related('project').prefetch_related(
@@ -133,36 +130,26 @@ def generate_gif(job):
             poster_path = os.path.join(tmp, 'poster.png')
             mp4_path = os.path.join(tmp, 'out.mp4')
 
-            # ── Phase 1: SAM segmentation ──────────────────────────────────
-            characters, combined_mask, unconsumed_regions = segment_characters(
+            characters, person_mask, leftover = segment_characters(
                 image, detections, tmp
             )
+            cutouts, cutout_mask, leftover = segment_ui_cutouts(
+                image, leftover, tmp, person_mask=person_mask
+            )
 
-            # Do NOT inpaint the background. cv2.inpaint on large characters
-            # creates terrible blurry smears. We keep the original image intact.
-            # Lighting effects (glow, rim) on characters will overlay perfectly.
-            background = image.convert('RGB')
+            # Inpaint only card holes. Person SAM still composites on the
+            # original poster pixels, same as before.
+            if cutouts:
+                background = inpaint_masked(image, cutout_mask, protect_mask=person_mask)
+                logger.info('Segmented %d UI cut-out(s) for job %s', len(cutouts), job.pk)
+            else:
+                background = image.convert('RGB')
             background.save(poster_path, format='PNG')
-            
+
             if characters:
                 logger.info('Segmented %d character(s) for job %s', len(characters), job.pk)
-            else:
-                logger.info('No person regions found.')
 
-            # ── Phase 2: Depth Map ─────────────────────────────────────────
-            depth_path = None
-            depth_pil = _get_depth_map(background)
-            if depth_pil is not None:
-                depth_path = os.path.join(tmp, 'depth.png')
-                depth_pil.save(depth_path, format='PNG')
-                logger.info('Depth map generated for job %s', job.pk)
-
-            # ── Phase 3: Build region/character payloads ───────────────────
-            if characters:
-                regions_payload = _regions_payload(unconsumed_regions)
-            else:
-                regions_payload = _regions_payload(detections)
-
+            regions_payload = _regions_payload(leftover)
             characters_payload = [
                 {
                     'src': f'char_{c.character_index}.png',
@@ -173,8 +160,19 @@ def generate_gif(job):
                 }
                 for c in characters
             ]
+            cutouts_payload = [
+                {
+                    'src': f'ui_{c.character_index}.png',
+                    'index': c.character_index,
+                    'bbox': c.bbox_norm,
+                    'effects': c.effects,
+                    'color': c.source_region.get('color'),
+                    'source': (c.source_region.get('source') or 'card').lower(),
+                    'label': c.source_region.get('label') or '',
+                }
+                for c in cutouts
+            ]
 
-            # ── Phase 4: Remotion render ───────────────────────────────────
             render_promo_video(
                 poster_path,
                 regions=regions_payload,
@@ -184,7 +182,7 @@ def generate_gif(job):
                 frame_count=frame_count,
                 output_mp4=mp4_path,
                 characters=characters_payload,
-                depth_map_path=depth_path,
+                cutouts=cutouts_payload,
             )
 
             with open(mp4_path, 'rb') as handle:

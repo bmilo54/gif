@@ -62,7 +62,9 @@ function boxPixels(region, canvasW, canvasH) {
   const radius =
     src === "button"
       ? Math.max(4, height / 2)
-      : Math.min(16, Math.min(width, height) * 0.12);
+      : src === "card"
+        ? Math.min(28, Math.min(width, height) * 0.22)
+        : Math.min(16, Math.min(width, height) * 0.12);
   return { left, top, width, height, radius };
 }
 
@@ -175,7 +177,7 @@ function LottieOverlay({ region, animationData, canvasW, canvasH, dur }) {
         playbackRate={playbackRate}
         loop
         style={{ width: "100%", height: "100%" }}
-        preserveAspectRatio="none"
+        preserveAspectRatio="xMidYMid meet"
       />
     </div>
   );
@@ -185,14 +187,19 @@ function wantsPixelMotion(effects) {
   return (effects || []).some((key) => PIXEL_MOTION.has(key));
 }
 
-function OverlayFX({ region, canvasW, canvasH, dur, wave }) {
+function OverlayFX({ region, canvasW, canvasH, dur, wave, faceWash = true }) {
   const effects = region.effects || [];
   const glowColor = interpolateColors(wave, [0, 1], ["rgba(255, 236, 180, 0.0)", "rgba(255, 236, 180, 0.32)"]);
   const goldColor = interpolateColors(wave, [0, 1], ["rgba(255, 214, 110, 0.0)", "rgba(255, 214, 110, 0.38)"]);
+  const wash = faceWash && (
+    hasEffect(effects, "glow") || hasEffect(effects, "breathe") || hasEffect(effects, "float")
+  );
+  const goldWash = faceWash && hasEffect(effects, "gold_pulse");
+  const rim = faceWash && (hasEffect(effects, "rim") || hasEffect(effects, "breathe"));
 
   return (
     <>
-      {hasEffect(effects, "glow") || hasEffect(effects, "breathe") || hasEffect(effects, "float") ? (
+      {wash ? (
         <GlowWash
           region={region}
           canvasW={canvasW}
@@ -201,7 +208,7 @@ function OverlayFX({ region, canvasW, canvasH, dur, wave }) {
           opacity={1}
         />
       ) : null}
-      {hasEffect(effects, "gold_pulse") ? (
+      {goldWash ? (
         <GlowWash
           region={region}
           canvasW={canvasW}
@@ -213,7 +220,7 @@ function OverlayFX({ region, canvasW, canvasH, dur, wave }) {
       {hasEffect(effects, "shine") ? (
         <ShineBand region={region} canvasW={canvasW} canvasH={canvasH} />
       ) : null}
-      {hasEffect(effects, "rim") || hasEffect(effects, "breathe") ? (
+      {rim ? (
         <RimGlow region={region} canvasW={canvasW} canvasH={canvasH} strength={wave} color={region.color || glowColor} />
       ) : null}
       {needsLottie(effects)
@@ -321,17 +328,95 @@ function CharacterLayer({ character, canvasW, canvasH, frame, dur, wave }) {
   );
 }
 
-export const Promo = ({ poster, regions, characters }) => {
+function CutoutLayer({ cutout, canvasW, canvasH, frame, dur, wave }) {
+  const effects = cutout.effects || [];
+  const motion = wantsPixelMotion(effects);
+  const color = cutout.color || "#ffecb4";
+  const effectStyle = motion ? computeEffectStyle(effects, frame, dur, color) : {};
+  const left = cutout.bbox.x * canvasW;
+  const top = cutout.bbox.y * canvasH;
+  const width = cutout.bbox.width * canvasW;
+  const height = cutout.bbox.height * canvasH;
+  const region = {
+    ...cutout,
+    x: cutout.bbox.x,
+    y: cutout.bbox.y,
+    width: cutout.bbox.width,
+    height: cutout.bbox.height,
+    source: cutout.source || "card",
+  };
+
+  const hasGlow =
+    hasEffect(effects, "glow") ||
+    hasEffect(effects, "gold_pulse") ||
+    hasEffect(effects, "rim");
+  const spread = 6 + 10 * wave;
+  const filterStyle = hasGlow ? `drop-shadow(0px 0px ${spread}px ${color})` : undefined;
+
+  const cutoutSrc = assetSrc(cutout.src);
+  const maskStyle = cutoutSrc
+    ? {
+        WebkitMaskImage: `url(${cutoutSrc})`,
+        maskImage: `url(${cutoutSrc})`,
+        WebkitMaskSize: "100% 100%",
+        maskSize: "100% 100%",
+        WebkitMaskRepeat: "no-repeat",
+        maskRepeat: "no-repeat",
+      }
+    : {};
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left,
+        top,
+        width,
+        height,
+        pointerEvents: "none",
+        transformOrigin: "center center",
+        ...effectStyle,
+      }}
+    >
+      <Img
+        src={cutoutSrc}
+        style={{
+          width: "100%",
+          height: "100%",
+          objectFit: "fill",
+          filter: filterStyle,
+        }}
+      />
+      <div style={{ position: "absolute", inset: 0, ...maskStyle }}>
+        <OverlayFX
+          region={{
+            ...region,
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+          }}
+          canvasW={width}
+          canvasH={height}
+          dur={dur}
+          wave={wave}
+          faceWash={false}
+        />
+      </div>
+    </div>
+  );
+}
+
+export const Promo = ({ poster, regions, characters, cutouts }) => {
   const { durationInFrames: dur, width, height } = useVideoConfig();
   const frame = useCurrentFrame();
   const wave = useLoopWave();
   const posterSrc = assetSrc(poster);
   const allRegions = Array.isArray(regions) ? regions : [];
   const allChars = Array.isArray(characters) ? characters : [];
-  
+  const allCutouts = Array.isArray(cutouts) ? cutouts : [];
+
   const ui = allRegions.filter(isUiRegion);
-  
-  // Also keep people array for fallback if SAM didn't run
   const people = allRegions.filter(isPersonRegion);
 
   return (
@@ -340,30 +425,40 @@ export const Promo = ({ poster, regions, characters }) => {
         <Img src={posterSrc} style={{ width, height, objectFit: "fill" }} />
       ) : null}
 
-      {allChars.length > 0 ? (
-        allChars.map((char) => (
-          <CharacterLayer
-            key={`char-${char.index}`}
-            character={char}
-            canvasW={width}
-            canvasH={height}
-            frame={frame}
-            dur={dur}
-            wave={wave}
-          />
-        ))
-      ) : (
-        people.map((region, idx) => (
-          <OverlayFX
-            key={`person-${region.key || idx}`}
-            region={region}
-            canvasW={width}
-            canvasH={height}
-            dur={dur}
-            wave={wave}
-          />
-        ))
-      )}
+      {allCutouts.map((item) => (
+        <CutoutLayer
+          key={`cutout-${item.index}`}
+          cutout={item}
+          canvasW={width}
+          canvasH={height}
+          frame={frame}
+          dur={dur}
+          wave={wave}
+        />
+      ))}
+
+      {allChars.length > 0
+        ? allChars.map((char) => (
+            <CharacterLayer
+              key={`char-${char.index}`}
+              character={char}
+              canvasW={width}
+              canvasH={height}
+              frame={frame}
+              dur={dur}
+              wave={wave}
+            />
+          ))
+        : people.map((region, idx) => (
+            <OverlayFX
+              key={`person-${region.key || idx}`}
+              region={region}
+              canvasW={width}
+              canvasH={height}
+              dur={dur}
+              wave={wave}
+            />
+          ))}
 
       {posterSrc
         ? ui.map((region, idx) => (

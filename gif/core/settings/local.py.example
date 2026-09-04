@@ -1,0 +1,15 @@
+# Copy this file to local.py (gitignored) and fill in keys.
+# Django loads it automatically from core/settings/__init__.py.
+
+# OCR.space — default text detector (DETECTION_TEXT_BACKEND = 'ocrspace')
+OCRSPACE_API_KEY = ''
+
+# Replicate — default object detector (DETECTION_OBJECT_BACKEND = 'replicate')
+# and optional rembg fallback for ornate card cut-outs
+REPLICATE_API_TOKEN = ''
+
+# Optional: GPT-4o character boxes (DETECTION_OBJECT_BACKEND = 'gpt4o')
+OPENAI_API_KEY = ''
+
+# Optional: Google Cloud Vision OCR (DETECTION_TEXT_BACKEND = 'google')
+# GOOGLE_APPLICATION_CREDENTIALS = r'C:\path\to\your\credentials.json'

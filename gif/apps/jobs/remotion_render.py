@@ -50,6 +50,7 @@ def render_promo_video(
     frame_count,
     output_mp4,
     characters=None,
+    cutouts=None,
     depth_map_path=None,
 ):
     """
@@ -84,7 +85,6 @@ def render_promo_video(
 
     shutil.copyfile(poster_path, public_dir / 'poster.png')
 
-    # Characters: copy each char_N.png into public dir
     characters_payload = []
     for char in (characters or []):
         src_name = char.get('src', '')
@@ -101,6 +101,24 @@ def render_promo_video(
         else:
             logger.warning('Character asset not found, skipping: %s', src_path)
 
+    cutouts_payload = []
+    for item in (cutouts or []):
+        src_name = item.get('src', '')
+        src_path = Path(poster_path).parent / src_name
+        if not src_path.exists():
+            logger.warning('UI cut-out asset not found, skipping: %s', src_path)
+            continue
+        shutil.copyfile(src_path, public_dir / src_name)
+        cutouts_payload.append({
+            'src': f'{public_id}/{src_name}',
+            'index': item.get('index', 0),
+            'bbox': item.get('bbox', {}),
+            'effects': item.get('effects', []),
+            'color': item.get('color'),
+            'source': item.get('source') or 'card',
+            'label': item.get('label') or '',
+        })
+
     # Depth map
     depth_map_prop = None
     if depth_map_path and Path(depth_map_path).exists():
@@ -113,6 +131,7 @@ def render_promo_video(
         'depthMap': depth_map_prop,
         'regions': list(regions or []),
         'characters': characters_payload,
+        'cutouts': cutouts_payload,
         'width': int(width),
         'height': int(height),
         'fps': int(round(fps)),
@@ -145,6 +164,8 @@ def render_promo_video(
             env=env,
             capture_output=True,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             check=False,
         )
     finally:

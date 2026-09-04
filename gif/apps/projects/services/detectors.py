@@ -7,7 +7,8 @@ pipeline never imports ultralytics or paddleocr directly. Those libraries are
 imported lazily inside each backend because they are multi-gigabyte optional
 dependencies that the web tier does not need to load.
 """
-
+import logging
+import os
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -15,6 +16,8 @@ from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
 from ..choices import SOURCE_OCR, SOURCE_YOLO
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -198,34 +201,57 @@ class YoloWorldCharacterDetector:
         return detections
 
 
+
+@lru_cache(maxsize=1)
+def _get_paddle_engine(lang, enable_mkldnn, use_doc_orientation, use_doc_unwarping,
+                       use_textline_orientation, det_limit_type, det_limit_side_len,
+                       det_unclip_ratio):
+    """
+    Module-level singleton for the PaddleOCR engine.
+    lru_cache ensures PaddleOCR is only initialised ONCE per process,
+    no matter how many requests come in.
+    """
+    try:
+        from paddleocr import PaddleOCR
+    except ImportError as exc:
+        raise ImproperlyConfigured(
+            "The 'paddle' detection backend requires paddleocr and paddlepaddle. "
+            "Install them or set DETECTION_TEXT_BACKEND = 'stub'."
+        ) from exc
+
+    import logging as _logging
+    _logging.getLogger(__name__).info('Initialising PaddleOCR engine (one-time setup)...')
+    return PaddleOCR(
+        lang=lang,
+        enable_mkldnn=enable_mkldnn,
+        use_doc_orientation_classify=use_doc_orientation,
+        use_doc_unwarping=use_doc_unwarping,
+        use_textline_orientation=use_textline_orientation,
+        text_det_limit_type=det_limit_type,
+        text_det_limit_side_len=det_limit_side_len,
+        text_det_unclip_ratio=det_unclip_ratio,
+    )
+
+
 class PaddleTextDetector:
     def __init__(self, lang=None, enable_mkldnn=None):
         self.lang = lang or settings.PADDLEOCR_LANG
         if enable_mkldnn is None:
             enable_mkldnn = settings.PADDLEOCR_ENABLE_MKLDNN
         self.enable_mkldnn = enable_mkldnn
-        self._engine = None
 
     def _load(self):
-        if self._engine is None:
-            try:
-                from paddleocr import PaddleOCR
-            except ImportError as exc:
-                raise ImproperlyConfigured(
-                    "The 'paddle' detection backend requires paddleocr and paddlepaddle. "
-                    "Install them or set DETECTION_TEXT_BACKEND = 'stub'."
-                ) from exc
-            self._engine = PaddleOCR(
-                lang=self.lang,
-                enable_mkldnn=self.enable_mkldnn,
-                use_doc_orientation_classify=settings.PADDLEOCR_USE_DOC_ORIENTATION,
-                use_doc_unwarping=settings.PADDLEOCR_USE_DOC_UNWARPING,
-                use_textline_orientation=settings.PADDLEOCR_USE_TEXTLINE_ORIENTATION,
-                text_det_limit_type=settings.PADDLEOCR_DET_LIMIT_TYPE,
-                text_det_limit_side_len=settings.PADDLEOCR_DET_LIMIT_SIDE_LEN,
-                text_det_unclip_ratio=settings.PADDLEOCR_DET_UNCLIP_RATIO,
-            )
-        return self._engine
+        return _get_paddle_engine(
+            lang=self.lang,
+            enable_mkldnn=self.enable_mkldnn,
+            use_doc_orientation=settings.PADDLEOCR_USE_DOC_ORIENTATION,
+            use_doc_unwarping=settings.PADDLEOCR_USE_DOC_UNWARPING,
+            use_textline_orientation=settings.PADDLEOCR_USE_TEXTLINE_ORIENTATION,
+            det_limit_type=settings.PADDLEOCR_DET_LIMIT_TYPE,
+            det_limit_side_len=settings.PADDLEOCR_DET_LIMIT_SIDE_LEN,
+            det_unclip_ratio=settings.PADDLEOCR_DET_UNCLIP_RATIO,
+        )
+
 
     def __call__(self, image):
         import numpy as np
@@ -332,7 +358,6 @@ class GoogleVisionTextDetector:
             
             creds = getattr(settings, 'GOOGLE_APPLICATION_CREDENTIALS', '')
             if creds:
-                import os
                 os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = creds
                 
             self._client = vision.ImageAnnotatorClient()
@@ -349,48 +374,51 @@ class GoogleVisionTextDetector:
         content = img_byte_arr.getvalue()
         
         v_image = vision.Image(content=content)
-        response = client.text_detection(image=v_image)
+        # Paragraph boxes, not words. Word hits on decorative gold type become
+        # a tiled grid once layout clustering unions neighbours.
+        response = client.document_text_detection(image=v_image)
         
         if response.error.message:
             raise Exception(f"{response.error.message}")
-            
+
         detections = []
         width, height = image.size
-        
-        # The first text annotation contains the entire text, skip it
-        for i, text_annot in enumerate(response.text_annotations):
-            if i == 0:
-                continue
-            text = text_annot.description
-            vertices = text_annot.bounding_poly.vertices
-            
-            # Get bounding box
-            xs = [v.x for v in vertices]
-            ys = [v.y for v in vertices]
-            x1, x2 = min(xs), max(xs)
-            y1, y2 = min(ys), max(ys)
-            
-            box_w = max(x2 - x1, 1.0)
-            box_h = max(y2 - y1, 1.0)
-            pad_x = max(width * 0.004, box_w * 0.10)
-            pad_y = max(height * 0.004, box_h * 0.20)
-            
-            x1 = max(0.0, x1 - pad_x)
-            y1 = max(0.0, y1 - pad_y)
-            x2 = min(float(width), x2 + pad_x)
-            y2 = min(float(height), y2 + pad_y)
-            
-            detections.append(Detection(
-                label=text,
-                confidence=1.0,
-                source=SOURCE_OCR,
-                x=x1 / width,
-                y=y1 / height,
-                width=(x2 - x1) / width,
-                height=(y2 - y1) / height,
-                text_content=text,
-            ))
-            
+        document = response.full_text_annotation
+        if not document:
+            return detections
+
+        for page in document.pages:
+            for block in page.blocks:
+                for paragraph in block.paragraphs:
+                    text = " ".join(
+                        "".join(symbol.text for symbol in word.symbols)
+                        for word in paragraph.words
+                    ).strip()
+                    if len("".join(text.split())) < 2:
+                        continue
+                    vertices = paragraph.bounding_box.vertices
+                    xs = [v.x for v in vertices]
+                    ys = [v.y for v in vertices]
+                    x1, x2 = min(xs), max(xs)
+                    y1, y2 = min(ys), max(ys)
+                    box_w = max(x2 - x1, 1.0)
+                    box_h = max(y2 - y1, 1.0)
+                    pad_x = max(width * 0.003, box_w * 0.04)
+                    pad_y = max(height * 0.003, box_h * 0.10)
+                    x1 = max(0.0, x1 - pad_x)
+                    y1 = max(0.0, y1 - pad_y)
+                    x2 = min(float(width), x2 + pad_x)
+                    y2 = min(float(height), y2 + pad_y)
+                    detections.append(Detection(
+                        label=text,
+                        confidence=1.0,
+                        source=SOURCE_OCR,
+                        x=x1 / width,
+                        y=y1 / height,
+                        width=(x2 - x1) / width,
+                        height=(y2 - y1) / height,
+                        text_content=text,
+                    ))
         return detections
 
 
@@ -411,24 +439,33 @@ class GPT4VisionCharacterDetector:
         import base64
         import io
         import json
+        from PIL import Image as _PILImage
         client = self._load()
-        
-        # Convert PIL to base64
+
+        # Resize to max 1024px to save tokens and speed up API call
+        MAX_SIDE = 1024
+        orig_w, orig_h = image.size
+        scale = min(MAX_SIDE / orig_w, MAX_SIDE / orig_h, 1.0)
+        if scale < 1.0:
+            canvas_w = int(orig_w * scale)
+            canvas_h = int(orig_h * scale)
+            canvas = image.convert('RGB').resize((canvas_w, canvas_h), _PILImage.LANCZOS)
+        else:
+            canvas = image.convert('RGB')
+
         img_byte_arr = io.BytesIO()
-        image.convert('RGB').save(img_byte_arr, format='JPEG', quality=85)
+        canvas.save(img_byte_arr, format='JPEG', quality=90)
         base64_image = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
-        
-        width, height = image.size
-        
+
         prompt = (
-            f"Image dimensions: {width}x{height} pixels.\n"
-            "Identify the main characters (people, cartoon heroes, mascots, 3D models) and any props they hold (coins, weapons, gifts).\n"
-            "Return a JSON array of objects. Each object must have:\n"
-            "- 'label': 'person' for characters, or the prop name for props.\n"
-            "- 'box': [x_min, y_min, x_max, y_max] in absolute pixels.\n"
-            "Output ONLY the JSON array, no markdown formatting."
+            "Identify ALL characters/people (including partially visible ones) and any props they hold "
+            "(coins, gifts, weapons, cards).\n"
+            "Return a JSON array. Each item:\n"
+            "  - 'label': 'person' for human/character, or the exact prop name for props.\n"
+            "  - 'box': [x_min, y_min, x_max, y_max] where each value is an integer from 0 to 1000 relative to the image dimensions (0 is top/left, 1000 is bottom/right).\n"
+            "Output ONLY valid JSON, no markdown, no extra text."
         )
-        
+
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
@@ -438,44 +475,239 @@ class GPT4VisionCharacterDetector:
                         {"type": "text", "text": prompt},
                         {
                             "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}",
+                                "detail": "high",   # use high-detail mode for accurate coords
+                            }
                         }
                     ]
                 }
             ],
-            max_tokens=500
+            max_tokens=800
         )
-        
+
         content = response.choices[0].message.content.strip()
-        if content.startswith("```json"):
-            content = content[7:-3]
-            
+        # Strip optional markdown code fence
+        if content.startswith("```"):
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+            content = content.strip()
+
         try:
             results = json.loads(content)
         except json.JSONDecodeError:
             import logging
             logging.getLogger(__name__).error("GPT-4o Vision returned invalid JSON: %s", content)
             return []
-            
+
         detections = []
         for res in results:
             label = res.get('label', 'person')
             box = res.get('box')
             if not box or len(box) != 4:
                 continue
-            x1, y1, x2, y2 = box
-            
-            # Normalize to 0-1
+            x1, y1, x2, y2 = [float(v) for v in box]
+
+            # Coords are 0-1000 → normalize to 0-1
             detections.append(Detection(
                 label=label,
                 confidence=0.99,
-                source=SOURCE_YOLO,  # Keep SOURCE_YOLO so pipeline treats it as character
+                source=SOURCE_YOLO,
+                x=x1 / 1000.0,
+                y=y1 / 1000.0,
+                width=(x2 - x1) / 1000.0,
+                height=(y2 - y1) / 1000.0,
+            ))
+
+        return detections
+
+
+class OcrSpaceTextDetector:
+    def __init__(self):
+        self.api_key = getattr(settings, 'OCRSPACE_API_KEY', None)
+        if not self.api_key:
+            raise ImproperlyConfigured("OCRSPACE_API_KEY is not set in settings.")
+            
+    def __call__(self, image):
+        import base64
+        import io
+        import requests
+        
+        img_byte_arr = io.BytesIO()
+        # Resize if too large (OCR.Space free tier limit is 1MB)
+        # Assuming original is around 1000px, JPEG 95% is fine
+        image.convert('RGB').save(img_byte_arr, format='JPEG', quality=85)
+        image_bytes = img_byte_arr.getvalue()
+        base64_image = "data:image/jpg;base64," + base64.b64encode(image_bytes).decode('utf-8')
+        
+        response = requests.post(
+            "https://api.ocr.space/parse/image",
+            data={
+                "base64Image": base64_image,
+                "apikey": self.api_key,
+                "isOverlayRequired": True,
+                "language": "eng",
+                "scale": False,
+                "detectOrientation": False,
+                "isTable": False,
+            }
+        )
+        
+        if response.status_code != 200:
+            raise Exception(f"OCR.Space API failed with status {response.status_code}")
+            
+        result = response.json()
+        if result.get("IsErroredOnProcessing"):
+            raise Exception(f"OCR.Space Error: {result.get('ErrorMessage')}")
+
+        parsed_results = result.get("ParsedResults") or []
+        width, height = image.size
+        scale_x, scale_y = self._overlay_scale(parsed_results, width, height)
+
+        # One box per text line. Word-level boxes on stylized posters become
+        # a grid: ornaments get read as extra words, then layout clustering
+        # tiles them into fake cards.
+        detections = []
+        for parsed_result in parsed_results:
+            overlay = parsed_result.get("TextOverlay") or {}
+            for line in overlay.get("Lines") or []:
+                words = [
+                    word for word in (line.get("Words") or [])
+                    if (word.get("WordText") or "").strip()
+                ]
+                if not words:
+                    continue
+                text = " ".join(word["WordText"].strip() for word in words)
+                if not self._usable_ocr_text(text):
+                    continue
+                x1 = min(float(word["Left"]) for word in words) * scale_x
+                y1 = min(float(word["Top"]) for word in words) * scale_y
+                x2 = max(float(word["Left"]) + float(word["Width"]) for word in words) * scale_x
+                y2 = max(float(word["Top"]) + float(word["Height"]) for word in words) * scale_y
+                box_w = max(x2 - x1, 1.0)
+                box_h = max(y2 - y1, 1.0)
+                pad_x = max(width * 0.003, box_w * 0.04)
+                pad_y = max(height * 0.003, box_h * 0.10)
+                x1 = max(0.0, x1 - pad_x)
+                y1 = max(0.0, y1 - pad_y)
+                x2 = min(float(width), x2 + pad_x)
+                y2 = min(float(height), y2 + pad_y)
+                detections.append(Detection(
+                    label=text,
+                    confidence=1.0,
+                    source=SOURCE_OCR,
+                    x=x1 / width,
+                    y=y1 / height,
+                    width=(x2 - x1) / width,
+                    height=(y2 - y1) / height,
+                    text_content=text,
+                ))
+        return detections
+
+    @staticmethod
+    def _usable_ocr_text(text):
+        compact = "".join(text.split())
+        if len(compact) < 2:
+            return False
+        return sum(ch.isalnum() for ch in compact) >= 2
+
+    @staticmethod
+    def _overlay_scale(parsed_results, width, height):
+        max_x = max_y = 0.0
+        for parsed_result in parsed_results:
+            overlay = parsed_result.get("TextOverlay") or {}
+            for line in overlay.get("Lines") or []:
+                for word in line.get("Words") or []:
+                    max_x = max(
+                        max_x,
+                        float(word.get("Left") or 0) + float(word.get("Width") or 0),
+                    )
+                    max_y = max(
+                        max_y,
+                        float(word.get("Top") or 0) + float(word.get("Height") or 0),
+                    )
+        scale_x = width / max_x if max_x > width * 1.05 else 1.0
+        scale_y = height / max_y if max_y > height * 1.05 else 1.0
+        return scale_x, scale_y
+
+
+class ReplicateObjectDetector:
+    def __init__(self):
+        self.model_version = "ultralytics/yolov8s-worldv2:96a016a98290d3ff1f3ed8942c916379701c84da9b6d5b19a107b1f86cdc97f5"
+
+    def __call__(self, image):
+        import base64
+        import io
+        import json
+        import os
+        try:
+            import replicate
+        except ImportError as exc:
+            raise ImproperlyConfigured("Install replicate to use ReplicateObjectDetector") from exc
+
+        token = getattr(settings, 'REPLICATE_API_TOKEN', '')
+        if not token:
+            raise ImproperlyConfigured("REPLICATE_API_TOKEN is not set in settings.")
+        os.environ['REPLICATE_API_TOKEN'] = token
+
+        # Ultralytics on Replicate saves file inputs as /tmp/...download with
+        # no extension, then refuses them. A JPEG data URI keeps the type.
+        buf = io.BytesIO()
+        image.convert('RGB').save(buf, format='JPEG', quality=95)
+        image_uri = 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode('ascii')
+
+        concepts = getattr(settings, 'CHARACTER_CONCEPTS', ['person'])
+        output = replicate.run(
+            self.model_version,
+            input={
+                "image": image_uri,
+                "class_names": ",".join(concepts),
+                "iou": 0.5,
+                "conf": 0.15,
+                "return_json": True,
+            },
+        )
+
+        if hasattr(output, 'read'):
+            output = output.read()
+        if isinstance(output, (bytes, bytearray)):
+            output = output.decode('utf-8', errors='replace')
+        if isinstance(output, str):
+            try:
+                output = json.loads(output)
+            except json.JSONDecodeError:
+                logger.warning('Replicate YOLO returned non-JSON: %s', output[:300])
+                return []
+
+        detections = []
+        width, height = image.size
+        rows = output
+        if isinstance(output, dict):
+            rows = output.get('predictions') or output.get('results') or output.get('boxes') or []
+        if not isinstance(rows, list):
+            return detections
+
+        for res in rows:
+            if not isinstance(res, dict):
+                continue
+            box = res.get('box_2d') or res.get('bbox') or res.get('xyxy')
+            if not box or len(box) < 4:
+                continue
+            x1, y1, x2, y2 = [float(v) for v in box[:4]]
+            if max(x2, y2) <= 1.5:
+                x1, x2 = x1 * width, x2 * width
+                y1, y2 = y1 * height, y2 * height
+            conf = res.get('score') or res.get('confidence') or 0.99
+            detections.append(Detection(
+                label='person',
+                confidence=float(conf),
+                source=SOURCE_YOLO,
                 x=x1 / width,
                 y=y1 / height,
                 width=(x2 - x1) / width,
                 height=(y2 - y1) / height,
             ))
-            
         return detections
 
 
@@ -484,12 +716,14 @@ OBJECT_BACKENDS = {
     'yolo': YoloObjectDetector,
     'yolo-world': YoloWorldCharacterDetector,
     'gpt4o': GPT4VisionCharacterDetector,
+    'replicate': ReplicateObjectDetector,
 }
 
 TEXT_BACKENDS = {
     'stub': StubTextDetector,
     'paddle': PaddleTextDetector,
     'google': GoogleVisionTextDetector,
+    'ocrspace': OcrSpaceTextDetector,
 }
 
 

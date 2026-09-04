@@ -100,19 +100,44 @@ def _drop_props_inside_ui(detections):
 
 
 def detect(image):
-    """Run YOLO, YOLO-World characters, OCR, UI grouping, and open-vocab props."""
+    """Run GPT-4o characters, PaddleOCR text, UI grouping, and open-vocab props."""
     detections = []
-    # Standard YOLO: detects real persons from COCO.
+
+    # GPT-4o (or other configured) object detector for characters/persons
     detections.extend(get_object_detector()(image))
-    # YOLO-World: open-vocab scan for cartoon / anime / 3D characters.
+
+    # YOLO-World character detector (disabled by default when GPT-4o is active)
     char_detector = get_character_detector()
     if char_detector is not None:
         detections.extend(char_detector(image))
+
+    # OCR lines → cards / buttons / titles. Do not also keep every leftover
+    # word: those are what painted a second grid over the characters.
     ocr = get_text_detector()(image)
-    detections.extend(ocr)
-    detections.extend(group_ui_regions(ocr))
+    ui_groups = group_ui_regions(ocr)
+
+    group_boxes = [(g.x, g.y, g.x + g.width, g.y + g.height) for g in ui_groups]
+
+    def _covered_by_group(word):
+        cx = word.x + word.width / 2
+        cy = word.y + word.height / 2
+        for gx1, gy1, gx2, gy2 in group_boxes:
+            if gx1 <= cx <= gx2 and gy1 <= cy <= gy2:
+                return True
+        return False
+
+    orphan_ocr = [
+        word for word in ocr
+        if not _covered_by_group(word)
+        and word.width * word.height >= 0.006
+        and sum(ch.isalnum() for ch in (word.label or '')) >= 4
+    ]
+    detections.extend(orphan_ocr)
+    detections.extend(ui_groups)
+
     detections.extend(detect_props(image))
     return merge_detections(detections)
+
 
 
 @transaction.atomic

@@ -238,13 +238,21 @@ LOGGING = {
     },
 }
 
-# Detection Settings
+# API Keys
 # Backends are swappable so the pipeline can run without the multi-gigabyte
 # ML stack installed. Switch to 'yolo' / 'paddle' once those are available.
-DETECTION_OBJECT_BACKEND = os.environ.get('DETECTION_OBJECT_BACKEND', 'gpt4o')
-DETECTION_TEXT_BACKEND = os.environ.get('DETECTION_TEXT_BACKEND', 'google')
+DETECTION_OBJECT_BACKEND = os.environ.get('DETECTION_OBJECT_BACKEND', 'replicate')
+DETECTION_TEXT_BACKEND = os.environ.get('DETECTION_TEXT_BACKEND', 'ocrspace')
+CHARACTER_DETECTION_ENABLED = True
+SAM_CONCEPT_FALLBACK = True
 
 # API Keys
+OCRSPACE_API_KEY = os.environ.get('OCRSPACE_API_KEY', '')
+
+REPLICATE_API_TOKEN = os.environ.get('REPLICATE_API_TOKEN', '')
+if REPLICATE_API_TOKEN:
+    import os
+    os.environ['REPLICATE_API_TOKEN'] = REPLICATE_API_TOKEN
 GOOGLE_APPLICATION_CREDENTIALS = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', '')
 if GOOGLE_APPLICATION_CREDENTIALS:
     import os
@@ -253,7 +261,7 @@ if GOOGLE_APPLICATION_CREDENTIALS:
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
 
 DETECTION_MIN_CONFIDENCE = 0.08
-DETECTION_IOU_THRESHOLD = 0.9
+DETECTION_IOU_THRESHOLD = 0.45
 
 YOLO_MODEL = os.path.join(BASE_DIR, 'ml_models', 'yolov8s.pt')
 
@@ -261,6 +269,12 @@ YOLO_MODEL = os.path.join(BASE_DIR, 'ml_models', 'yolov8s.pt')
 # Open-vocab props (dragon, gift, coins): SAM 3 if SAM3_ENABLED, else YOLO-World.
 SAM_ENABLED = True
 SAM_MODEL = os.path.join(BASE_DIR, 'ml_models', 'sam2.1_t.pt')
+if not os.path.exists(SAM_MODEL):
+    _sam_fallback = os.path.join(BASE_DIR, 'sam2.1_t.pt')
+    if os.path.exists(_sam_fallback):
+        SAM_MODEL = _sam_fallback
+# Crop-level background removal on Replicate if local SAM is missing.
+REPLICATE_CUTOUT_MODEL = os.environ.get('REPLICATE_CUTOUT_MODEL', 'cjwbw/rembg')
 SAM3_ENABLED = False
 SAM3_MODEL = os.path.join(BASE_DIR, 'ml_models', 'sam3.pt')
 SAM_CONCEPT_FALLBACK = True
@@ -281,9 +295,8 @@ SAM_PROP_CONCEPTS = [
 
 # ---------------------------------------------------------------------------
 # YOLO-World open-vocabulary CHARACTER detection.
-# Runs after standard YOLO so cartoon / anime / 3D characters are also boxed.
+# Disabled: GPT-4o is now the character detector (set CHARACTER_DETECTION_ENABLED above).
 # ---------------------------------------------------------------------------
-CHARACTER_DETECTION_ENABLED = True
 CHARACTER_MIN_CONFIDENCE = 0.12   # lower than YOLO to catch stylised art
 CHARACTER_CONCEPTS = [
     # Real people (YOLO covers these, but YOLO-World picks up edge cases)

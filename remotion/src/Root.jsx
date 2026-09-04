@@ -17,6 +17,8 @@ export const RemotionRoot = () => {
         personRegion: {},
         effects: ["shine"],
         regions: [],
+        characters: [],
+        cutouts: [],
         durationInFrames: 32,
         fps: 20,
         width: 720,

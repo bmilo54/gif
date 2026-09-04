@@ -5,8 +5,9 @@ from django.http import JsonResponse
 from django.shortcuts import redirect
 from django.urls import reverse
 from django.views import View
-from django.views.generic import CreateView, DetailView
+from django.views.generic import CreateView, DetailView, DeleteView
 from django.views.generic.detail import SingleObjectMixin
+from django.urls import reverse_lazy
 
 from .forms import ProjectUploadForm
 from .models import Project
@@ -82,6 +83,15 @@ class ProjectDetectView(SingleObjectMixin, View):
             messages.success(request, f"Detected {len(created)} object(s).")
 
         return redirect('projects:project_detail', pk=project.pk)
+
+class ProjectDeleteView(DeleteView):
+    model = Project
+    template_name = 'projects/project_confirm_delete.html'
+    success_url = reverse_lazy('projects:project_upload')
+    
+    def delete(self, request, *args, **kwargs):
+        messages.success(request, "Project deleted successfully.")
+        return super().delete(request, *args, **kwargs)
 
 
 class ProjectDetectionsJsonView(DetailView):

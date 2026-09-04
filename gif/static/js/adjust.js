@@ -36,23 +36,9 @@
             label: 'UI Animation',
             forUi: true,
             effects: [
-                { key: 'float', label: 'Idle float' },
-                { key: 'float-glow', label: 'Float & Glow' },
                 { key: 'zoom', label: 'Slow zoom' },
-                { key: 'bounce', label: 'Bounce' },
-                { key: 'shake', label: 'Impact Shake' },
-                { key: 'wave', label: 'Wave sway' },
-                { key: 'spin', label: 'Spin' },
+                { key: 'float', label: 'Idle float' },
             ],
-        },
-        {
-            label: 'Entrance / Motion',
-            forUi: true,
-            effects: [
-                { key: 'slide-up', label: 'Slide Up' },
-                { key: 'slide-left', label: 'Slide from Left' },
-                { key: 'zoom-in', label: 'Elastic Zoom' },
-            ]
         },
         {
             label: 'Lighting / Color',
@@ -79,6 +65,52 @@
     // -----------------------------------------------------------------------
     // Region state
     // -----------------------------------------------------------------------
+    function normalizeHex(color) {
+        if (!color || typeof color !== 'string') {
+            return '#ffecb4';
+        }
+        const value = color.trim();
+        const six = value.match(/^#([0-9a-fA-F]{6})$/);
+        if (six) {
+            return '#' + six[1].toLowerCase();
+        }
+        const three = value.match(/^#([0-9a-fA-F]{3})$/);
+        if (three) {
+            const n = three[1];
+            return ('#' + n[0] + n[0] + n[1] + n[1] + n[2] + n[2]).toLowerCase();
+        }
+        return '#ffecb4';
+    }
+
+    // Large card motion (bounce / spin / slide) looks like the plaque is
+    // flying off the poster, especially next to an arm.
+    const UI_BLOCKED_MOTION = {
+        bounce: true,
+        shake: true,
+        wave: true,
+        spin: true,
+        'float-glow': true,
+        'slide-up': true,
+        'slide-left': true,
+        'zoom-in': true,
+        'natural-breathe': true,
+    };
+
+    function isUiSource(source) {
+        const src = (source || '').toLowerCase();
+        return src === 'card' || src === 'button' || src === 'title' || src === 'ocr';
+    }
+
+    function sanitizeEffects(effects, source) {
+        const list = Array.isArray(effects) ? effects.slice() : [];
+        if (!isUiSource(source)) {
+            return list;
+        }
+        return list.filter(function (key) {
+            return !UI_BLOCKED_MOTION[key];
+        });
+    }
+
     const regions = (JSON.parse(dataNode.textContent) || []).map(function (item, index) {
         return {
             key: item.key || ('region-' + index),
@@ -88,16 +120,14 @@
             y: Number(item.y) || 0,
             width: Number(item.width) || MIN,
             height: Number(item.height) || MIN,
-            effects: Array.isArray(item.effects) ? item.effects.slice() : [],
+            effects: Array.isArray(item.effects) ? sanitizeEffects(item.effects, item.source) : [],
+            color: normalizeHex(item.color),
         };
     });
 
     let selected = regions.length ? 0 : -1;
     let drag = null;
 
-    // -----------------------------------------------------------------------
-    // Canvas helpers
-    // -----------------------------------------------------------------------
     function colorFor(source, isSelected) {
         if (isSelected) return '#3fb950';
         if (source === 'ocr' || source === 'title') return '#f0b429';
@@ -220,7 +250,7 @@
             + item.source + '</span> '
             + escapeHtml(item.label) + '</h3>';
 
-        const currentColor = item.color || '#ffecb4';
+        const currentColor = normalizeHex(item.color);
         html += '<div class="effect-settings" style="margin-bottom: 15px; display: flex; align-items: center; gap: 10px;">'
              +  '<label for="region-color-picker" style="font-weight: 500; font-size: 14px; color: #c9d1d9;">Glow/Rim Color:</label>'
              +  '<input type="color" id="region-color-picker" value="' + currentColor + '" style="background: none; border: 1px solid #30363d; border-radius: 4px; padding: 0; width: 32px; height: 32px; cursor: pointer;">'

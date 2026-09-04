@@ -13,4 +13,5 @@ urlpatterns = [
         views.ProjectDetectionsJsonView.as_view(),
         name='project_detections_json',
     ),
+    path(r'project/<int:pk>/delete/', views.ProjectDeleteView.as_view(), name='project_delete'),
 ]
