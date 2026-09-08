@@ -344,7 +344,11 @@
     }
 
     function escapeHtml(str) {
-        return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        return String(str || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
     }
 
     // -----------------------------------------------------------------------
@@ -361,12 +365,12 @@
                 ? '<span class="effect-badge">' + effectCount + ' fx</span>'
                 : '';
             row.innerHTML =
-                '<button type="button" class="region-pick" data-index="' + index + '" style="display:flex;align-items:center;gap:6px;">'
-                + '<span class="tag tag-' + item.source + '">' + item.source + '</span> '
-                + escapeHtml(item.label)
+                '<button type="button" class="region-pick" data-index="' + index + '" title="' + escapeHtml(item.label) + '">'
+                + '<span class="tag tag-' + item.source + '">' + item.source + '</span>'
+                + '<span class="region-pick-label">' + escapeHtml(item.label) + '</span>'
                 + badge
                 + '</button>'
-                + '<button type="button" class="region-remove" data-index="' + index + '" aria-label="Remove">Remove</button>';
+                + '<button type="button" class="region-remove" data-index="' + index + '" title="Remove region" aria-label="Remove region">&times;</button>';
             list.appendChild(row);
         });
     }
