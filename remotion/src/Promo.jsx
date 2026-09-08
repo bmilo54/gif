@@ -49,6 +49,11 @@ function isUiRegion(region) {
   return UI_SOURCES.has(src) && !isPersonRegion(region);
 }
 
+function isPlaqueCutout(item) {
+  const src = (item.source || "").toLowerCase();
+  return src === "card" || src === "button" || src === "title";
+}
+
 function hasEffect(effects, name) {
   return Array.isArray(effects) && effects.includes(name);
 }
@@ -191,11 +196,9 @@ function OverlayFX({ region, canvasW, canvasH, dur, wave, faceWash = true }) {
   const effects = region.effects || [];
   const glowColor = interpolateColors(wave, [0, 1], ["rgba(255, 236, 180, 0.0)", "rgba(255, 236, 180, 0.32)"]);
   const goldColor = interpolateColors(wave, [0, 1], ["rgba(255, 214, 110, 0.0)", "rgba(255, 214, 110, 0.38)"]);
-  const wash = faceWash && (
-    hasEffect(effects, "glow") || hasEffect(effects, "breathe") || hasEffect(effects, "float")
-  );
+  const wash = faceWash && hasEffect(effects, "glow");
   const goldWash = faceWash && hasEffect(effects, "gold_pulse");
-  const rim = faceWash && (hasEffect(effects, "rim") || hasEffect(effects, "breathe"));
+  const rim = faceWash && hasEffect(effects, "rim");
 
   return (
     <>
@@ -282,25 +285,35 @@ function UiLayer({ region, posterSrc, canvasW, canvasH, frame, dur, wave }) {
   );
 }
 
+function hexToGlow(color, alpha) {
+  const raw = String(color || "#ffecb4").replace("#", "");
+  if (raw.length !== 6) {
+    return `rgba(255, 236, 180, ${alpha})`;
+  }
+  const r = parseInt(raw.slice(0, 2), 16);
+  const g = parseInt(raw.slice(2, 4), 16);
+  const b = parseInt(raw.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 function CharacterLayer({ character, canvasW, canvasH, frame, dur, wave }) {
   const effects = character.effects || [];
   const motion = wantsPixelMotion(effects);
   const color = character.color || "#ffecb4";
   const effectStyle = motion ? computeEffectStyle(effects, frame, dur, color) : {};
-  
+  // Filters on the wrapper recolor skin. Keep motion only; glow stays behind.
+  const { filter: _ignoreFilter, ...motionStyle } = effectStyle;
+
   const left = character.bbox.x * canvasW;
   const top = character.bbox.y * canvasH;
   const width = character.bbox.width * canvasW;
   const height = character.bbox.height * canvasH;
 
-  const hasGlow = hasEffect(effects, "glow") || hasEffect(effects, "breathe") || hasEffect(effects, "natural-breathe");
-  const hasRim = hasEffect(effects, "rim");
-  
-  let filterStyle = "";
-  if (hasGlow || hasRim) {
-    const spread = 8 + 12 * wave;
-    filterStyle = `drop-shadow(0px 0px ${spread}px ${color})`;
-  }
+  const wantsHalo = hasEffect(effects, "glow") || hasEffect(effects, "rim");
+  const spread = 6 + 8 * wave;
+  const halo = hexToGlow(color, 0.35 + 0.2 * wave);
+  const src = assetSrc(character.src);
+  const fillStyle = { width: "100%", height: "100%", objectFit: "fill" };
 
   return (
     <div
@@ -312,18 +325,22 @@ function CharacterLayer({ character, canvasW, canvasH, frame, dur, wave }) {
         height,
         pointerEvents: "none",
         transformOrigin: "center center",
-        ...effectStyle,
+        ...motionStyle,
       }}
     >
-      <Img
-        src={assetSrc(character.src)}
-        style={{ 
-          width: "100%", 
-          height: "100%", 
-          objectFit: "fill",
-          filter: filterStyle || undefined
-        }}
-      />
+      {wantsHalo && src ? (
+        <Img
+          src={src}
+          style={{
+            ...fillStyle,
+            position: "absolute",
+            inset: 0,
+            filter: `drop-shadow(0px 0px ${spread}px ${halo})`,
+            opacity: 0.7,
+          }}
+        />
+      ) : null}
+      <Img src={src} style={{ ...fillStyle, position: "relative" }} />
     </div>
   );
 }
@@ -333,6 +350,7 @@ function CutoutLayer({ cutout, canvasW, canvasH, frame, dur, wave }) {
   const motion = wantsPixelMotion(effects);
   const color = cutout.color || "#ffecb4";
   const effectStyle = motion ? computeEffectStyle(effects, frame, dur, color) : {};
+  const { filter: _ignoreFilter, ...motionStyle } = effectStyle;
   const left = cutout.bbox.x * canvasW;
   const top = cutout.bbox.y * canvasH;
   const width = cutout.bbox.width * canvasW;
@@ -375,7 +393,7 @@ function CutoutLayer({ cutout, canvasW, canvasH, frame, dur, wave }) {
         height,
         pointerEvents: "none",
         transformOrigin: "center center",
-        ...effectStyle,
+        ...motionStyle,
       }}
     >
       <Img
@@ -407,6 +425,23 @@ function CutoutLayer({ cutout, canvasW, canvasH, frame, dur, wave }) {
   );
 }
 
+function isFrontCutout(item, chars) {
+  if (item && item.front) return true;
+  const box = item && item.bbox;
+  if (!box || !chars || !chars.length) return false;
+  const cy = box.y + box.height / 2;
+  return chars.some((person) => {
+    const p = person.bbox;
+    if (!p) return false;
+    const overlaps =
+      box.x < p.x + p.width &&
+      box.x + box.width > p.x &&
+      box.y < p.y + p.height &&
+      box.y + box.height > p.y;
+    return overlaps && cy > p.y + p.height * 0.52;
+  });
+}
+
 export const Promo = ({ poster, regions, characters, cutouts }) => {
   const { durationInFrames: dur, width, height } = useVideoConfig();
   const frame = useCurrentFrame();
@@ -416,8 +451,12 @@ export const Promo = ({ poster, regions, characters, cutouts }) => {
   const allChars = Array.isArray(characters) ? characters : [];
   const allCutouts = Array.isArray(cutouts) ? cutouts : [];
 
-  const ui = allRegions.filter(isUiRegion);
   const people = allRegions.filter(isPersonRegion);
+  const ui = allRegions.filter(isUiRegion);
+  const plaqueCutouts = allCutouts.filter(isPlaqueCutout);
+  const plaqueBack = plaqueCutouts.filter((item) => !isFrontCutout(item, allChars));
+  const plaqueFront = plaqueCutouts.filter((item) => isFrontCutout(item, allChars));
+  const propCutouts = allCutouts.filter((item) => !isPlaqueCutout(item));
 
   return (
     <AbsoluteFill style={{ background: "#000", overflow: "hidden" }}>
@@ -425,7 +464,22 @@ export const Promo = ({ poster, regions, characters, cutouts }) => {
         <Img src={posterSrc} style={{ width, height, objectFit: "fill" }} />
       ) : null}
 
-      {allCutouts.map((item) => (
+      {posterSrc
+        ? ui.map((region, idx) => (
+            <UiLayer
+              key={`ui-${region.key || idx}`}
+              region={region}
+              posterSrc={posterSrc}
+              canvasW={width}
+              canvasH={height}
+              frame={frame}
+              dur={dur}
+              wave={wave}
+            />
+          ))
+        : null}
+
+      {plaqueBack.map((item) => (
         <CutoutLayer
           key={`cutout-${item.index}`}
           cutout={item}
@@ -460,20 +514,29 @@ export const Promo = ({ poster, regions, characters, cutouts }) => {
             />
           ))}
 
-      {posterSrc
-        ? ui.map((region, idx) => (
-            <UiLayer
-              key={`ui-${region.key || idx}`}
-              region={region}
-              posterSrc={posterSrc}
-              canvasW={width}
-              canvasH={height}
-              frame={frame}
-              dur={dur}
-              wave={wave}
-            />
-          ))
-        : null}
+      {plaqueFront.map((item) => (
+        <CutoutLayer
+          key={`cutout-front-${item.index}`}
+          cutout={item}
+          canvasW={width}
+          canvasH={height}
+          frame={frame}
+          dur={dur}
+          wave={wave}
+        />
+      ))}
+
+      {propCutouts.map((item) => (
+        <CutoutLayer
+          key={`prop-${item.index}`}
+          cutout={item}
+          canvasW={width}
+          canvasH={height}
+          frame={frame}
+          dur={dur}
+          wave={wave}
+        />
+      ))}
     </AbsoluteFill>
   );
 };

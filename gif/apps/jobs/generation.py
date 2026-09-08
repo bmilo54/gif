@@ -9,6 +9,7 @@ from django.core.files.base import ContentFile
 from apps.projects.services.preprocessing import load_preprocessed_image
 from apps.projects.services.segmentation import (
     inpaint_masked,
+    knock_card_glow_off_characters,
     segment_characters,
     segment_ui_cutouts,
 )
@@ -136,6 +137,11 @@ def generate_gif(job):
             cutouts, cutout_mask, leftover = segment_ui_cutouts(
                 image, leftover, tmp, person_mask=person_mask
             )
+            if characters and cutouts:
+                knock_card_glow_off_characters(
+                    characters, cutout_mask, image.width, image.height,
+                    cutouts=cutouts,
+                )
 
             # Inpaint only card holes. Person SAM still composites on the
             # original poster pixels, same as before.
@@ -169,6 +175,7 @@ def generate_gif(job):
                     'color': c.source_region.get('color'),
                     'source': (c.source_region.get('source') or 'card').lower(),
                     'label': c.source_region.get('label') or '',
+                    'front': bool(c.source_region.get('front')),
                 }
                 for c in cutouts
             ]

@@ -21,18 +21,74 @@ from .segmentation import detect_props
 logger = logging.getLogger(__name__)
 
 
-def _intersection_over_union(a, b):
+def _intersection_area(a, b):
     left = max(a.x, b.x)
     top = max(a.y, b.y)
     right = min(a.x + a.width, b.x + b.width)
     bottom = min(a.y + a.height, b.y + b.height)
-
     if right <= left or bottom <= top:
         return 0.0
+    return (right - left) * (bottom - top)
 
-    overlap = (right - left) * (bottom - top)
+
+def _intersection_over_union(a, b):
+    overlap = _intersection_area(a, b)
     union = (a.width * a.height) + (b.width * b.height) - overlap
     return overlap / union if union else 0.0
+
+
+def _box_center_in(inner, outer):
+    cx = inner.x + inner.width / 2.0
+    cy = inner.y + inner.height / 2.0
+    return (
+        outer.x <= cx <= outer.x + outer.width
+        and outer.y <= cy <= outer.y + outer.height
+    )
+
+
+def _fraction_inside(inner, outer):
+    area = inner.width * inner.height
+    if area <= 0:
+        return 0.0
+    return _intersection_area(inner, outer) / area
+
+
+class _Box:
+    __slots__ = ('x', 'y', 'width', 'height')
+
+    def __init__(self, x, y, width, height):
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+
+
+def _inflate(item, pad=0.12):
+    return _Box(
+        item.x - item.width * pad,
+        item.y - item.height * pad,
+        item.width * (1 + 2 * pad),
+        item.height * (1 + 2 * pad),
+    )
+
+
+def _hangs_under(inner, outer):
+    """Coins/gifts often sit just below the % text, slightly outside the OCR box."""
+    icx = inner.x + inner.width / 2.0
+    if icx < outer.x or icx > outer.x + outer.width:
+        return False
+    outer_bottom = outer.y + outer.height
+    inner_bottom = inner.y + inner.height
+    return inner.y <= outer_bottom + 0.09 and inner_bottom >= outer_bottom - 0.05
+
+
+def _prop_is_ui_art(item, region):
+    padded = _inflate(region)
+    return (
+        _box_center_in(item, padded)
+        or _fraction_inside(item, padded) >= 0.35
+        or _hangs_under(item, region)
+    )
 
 
 def merge_detections(detections, min_confidence=None, iou_threshold=None):
@@ -84,7 +140,12 @@ def merge_detections(detections, min_confidence=None, iou_threshold=None):
 
 
 def _drop_props_inside_ui(detections):
-    """Keep dragon/gift/coins on the character; drop props that are just card art."""
+    """Keep dragon/gift/coins on the character; drop props that are just card art.
+
+    IoU is the wrong test: a small gift on a large bonus card has tiny IoU
+    even when it sits fully inside the plaque, so it used to survive and get
+    SAM-cut as a second layer on top of the card (jitter / melt).
+    """
     ui = [
         item for item in detections
         if item.source in (SOURCE_CARD, SOURCE_BUTTON, SOURCE_TITLE)
@@ -92,7 +153,7 @@ def _drop_props_inside_ui(detections):
     kept = []
     for item in detections:
         if item.source == SOURCE_PROP and any(
-            _intersection_over_union(item, region) >= 0.45 for region in ui
+            _prop_is_ui_art(item, region) for region in ui
         ):
             continue
         kept.append(item)
