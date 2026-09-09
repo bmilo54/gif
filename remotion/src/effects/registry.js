@@ -68,20 +68,16 @@ const REGISTRY = {
   "natural-breathe": {
     kind: "motion",
     compute(frame, dur) {
-      // Scales only on Y axis from the bottom. Mimics taking a breath.
-      // Zero horizontal expansion means it will NEVER overlap adjacent UI cards!
       const sy = 1 + interpolate(wave(frame, dur), [0, 1], [0, 0.025], {
         extrapolateLeft: "clamp",
         extrapolateRight: "clamp",
       });
-      return { 
+      return {
         transform: `scaleY(${sy})`,
-        transformOrigin: "bottom center" 
+        transformOrigin: "bottom center",
       };
     },
   },
-
-
 
   zoom: {
     kind: "motion",
@@ -91,6 +87,25 @@ const REGISTRY = {
         extrapolateRight: "clamp",
       });
       return { transform: `scale(${s})` };
+    },
+  },
+
+  pulse: {
+    kind: "motion",
+    compute(frame, dur) {
+      const s = 1 + interpolate(wave(frame, dur), [0, 1], [0, 0.055], {
+        extrapolateLeft: "clamp",
+        extrapolateRight: "clamp",
+      });
+      return { transform: `scale(${s})` };
+    },
+  },
+
+  tilt: {
+    kind: "motion",
+    compute(frame, dur) {
+      const deg = Math.sin((frame / Math.max(dur, 1)) * Math.PI * 2) * 5;
+      return { transform: `rotate(${deg}deg)` };
     },
   },
 
@@ -171,11 +186,9 @@ const REGISTRY = {
     kind: "filter",
     compute(frame, dur, regionColor) {
       const w = wave(frame, dur);
-      // Pulsing intense glow filter 
-      const blur = 5 + w * 15;
-      const opacity = 0.5 + w * 0.5;
+      const blur = 6 + w * 16;
       const c = regionColor || "rgba(0, 255, 200, 1)";
-      return { filter: `drop-shadow(0px 0px ${blur}px ${c}) opacity(${opacity})` };
+      return { filter: `drop-shadow(0px 0px ${blur}px ${c})` };
     },
   },
 
@@ -183,15 +196,8 @@ const REGISTRY = {
     kind: "filter",
     compute(frame, dur) {
       const w = wave(frame, dur);
-      const sepia = interpolate(w, [0, 1], [0.1, 0.55], {
-        extrapolateLeft: "clamp",
-        extrapolateRight: "clamp",
-      });
-      const saturate = interpolate(w, [0, 1], [1, 1.8], {
-        extrapolateLeft: "clamp",
-        extrapolateRight: "clamp",
-      });
-      return { filter: `sepia(${sepia}) saturate(${saturate})` };
+      const blur = 6 + w * 14;
+      return { filter: `drop-shadow(0 0 ${blur}px rgba(255, 210, 90, 0.9))` };
     },
   },
 
@@ -232,12 +238,19 @@ const REGISTRY = {
   },
 
   // -------------------------------------------------------------------------
-  // PARTICLE / COLOUR
+  // OVERLAY (drawn in Promo.jsx, not as CSS on the layer)
   // -------------------------------------------------------------------------
 
-  sparkle: {
-    kind: "lottie",
-    // Rendered separately via <LottieOverlay> using the existing sparkle.json
+  twinkle: {
+    kind: "overlay",
+  },
+
+  sheen: {
+    kind: "overlay",
+  },
+
+  halo: {
+    kind: "overlay",
   },
 
   color_shift: {
@@ -315,16 +328,18 @@ export function computeEffectStyle(effects, frame, dur, regionColor) {
   const transforms = [];
   const filters = [];
   let opacity = style.opacity;
+  let transformOrigin;
 
   for (const key of effects) {
     const entry = REGISTRY[key];
-    if (!entry || entry.kind === "lottie" || ["float-glow", "slide-left", "zoom-in", "shake", "rainbow"].includes(key)) {
+    if (!entry || entry.kind === "lottie" || entry.kind === "overlay" || ["float-glow", "slide-left", "zoom-in", "shake", "rainbow"].includes(key)) {
       continue;
     }
     const result = entry.compute(frame, dur, regionColor);
     if (result.transform) transforms.push(result.transform);
     if (result.filter) filters.push(result.filter);
     if (result.opacity !== undefined) opacity *= result.opacity;
+    if (result.transformOrigin) transformOrigin = result.transformOrigin;
   }
 
   if (transformStr) transforms.push(transformStr.trim());
@@ -333,6 +348,7 @@ export function computeEffectStyle(effects, frame, dur, regionColor) {
   return {
     ...(transforms.length ? { transform: transforms.join(" ") } : {}),
     ...(filters.length ? { filter: filters.join(" ") } : {}),
+    ...(transformOrigin ? { transformOrigin } : {}),
     opacity,
   };
 }
@@ -361,10 +377,8 @@ export function computeCharacterEffectStyle(effects, frame, dur) {
     });
   }
   if (effects.includes("breathe")) {
-    ty += interpolate(w, [0, 1], [0, -2.5], {
-      extrapolateLeft: "clamp",
-      extrapolateRight: "clamp",
-    });
+    const result = REGISTRY.breathe.compute(frame, dur);
+    if (result.transform) transforms.push(result.transform);
   }
   if (effects.includes("bounce")) {
     const cycle = t % (1 / 3);
@@ -397,12 +411,12 @@ export function computeCharacterEffectStyle(effects, frame, dur) {
 
   const lightingSkip = new Set([
     "float", "float-glow", "breathe", "zoom", "zoom-in", "bounce",
-    "shake", "wave", "spin", "slide-left", "parallax", "sparkle",
+    "shake", "wave", "spin", "slide-left", "parallax", "sparkle", "twinkle", "tilt",
   ]);
   for (const key of effects) {
     if (lightingSkip.has(key)) continue;
     const entry = REGISTRY[key];
-    if (!entry || entry.kind === "lottie") continue;
+    if (!entry || entry.kind === "lottie" || entry.kind === "overlay") continue;
     const result = entry.compute(frame, dur);
     if (result.filter) filters.push(result.filter);
     if (result.opacity !== undefined) opacity *= result.opacity;

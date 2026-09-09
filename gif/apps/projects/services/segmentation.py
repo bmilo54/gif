@@ -329,6 +329,7 @@ class CharacterLayer:
     character_index: int
     effects: _List[str]         # per-character effects chosen by the user
     source_region: dict         # original region dict
+    hand_boxes: _List[tuple] = _field(default_factory=list)
 
 
 _PERSON_SOURCES = {'yolo', 'sam'}
@@ -425,8 +426,47 @@ def _looks_like_prop(region):
         token in label
         for token in (
             'prop', 'pill', 'coin', 'dragon', 'gift', 'star', 'badge', 'chest',
+            'chicken', 'food', 'drumstick', 'bucket', 'wing',
         )
     )
+
+
+def _is_small_handheld(region):
+    area = float(region.get('width') or 0) * float(region.get('height') or 0)
+    return 0.0 < area < 0.12
+
+
+def _boxes_overlap_px(a, b):
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    return min(ax2, bx2) > max(ax1, bx1) and min(ay2, by2) > max(ay1, by1)
+
+
+def overlaps_character(region, person_regions, pad=0.28):
+    """True if this leftover box sits on a person (raised hand, chicken, coins)."""
+    src = (region.get('source') or '').lower()
+    if src in _PLAQUE_SOURCES:
+        return False
+    for person in person_regions or []:
+        outer = _inflate_region(person, pad=pad)
+        if _region_center_in(region, outer) or _region_fraction_inside(region, outer) >= 0.18:
+            return True
+    return False
+
+
+def _region_hits_person_mask(region, person_mask, img_w, img_h, thresh=0.10):
+    import numpy as np
+
+    if person_mask is None:
+        return False
+    arr = np.array(person_mask)
+    if arr.max() == 0:
+        return False
+    x1, y1, x2, y2 = _pixel_box_padded(region, img_w, img_h, pad=0.04)
+    patch = arr[y1:y2, x1:x2]
+    if patch.size == 0:
+        return False
+    return float((patch > 16).mean()) >= thresh
 
 
 def _is_card_art_prop(region, ui_regions):
@@ -489,18 +529,16 @@ def segment_characters(image, regions: list, tmp_dir: str):
     ]
 
     for j, o_reg in enumerate(other_regions):
-        if not _looks_like_prop(o_reg):
+        src = (o_reg.get('source') or '').lower()
+        if src in _PLAQUE_SOURCES:
             continue
-
-        attached = (o_reg.get('source') or '').lower() == 'prop'
+        tagged = src == 'prop'
         # Card decorations stay on the plaque. User-tagged PROP coins in a
         # hand must not be swallowed just because they sit near a bonus card.
-        if not attached and (
+        if not tagged and (
             _is_card_art_prop(o_reg, ui_regions) or _sits_on_plaque(o_reg, ui_regions)
         ):
             consumed_prop_ids.add(id(o_reg))
-            continue
-        if not attached:
             continue
 
         ox1, oy1, ox2, oy2 = _pixel_box_padded(o_reg, img_w, img_h)
@@ -533,9 +571,22 @@ def segment_characters(image, regions: list, tmp_dir: str):
                     best_dist = dist
                     best_person = i
 
-        if best_person >= 0:
+        should_attach = tagged or _looks_like_prop(o_reg)
+        if not should_attach and best_person >= 0 and _is_small_handheld(o_reg):
+            px1, py1, px2, py2 = person_boxes[best_person]
+            pad_x = int((px2 - px1) * 0.22)
+            pad_y = int((py2 - py1) * 0.22)
+            near = (
+                px1 - pad_x,
+                max(0, py1 - pad_y),
+                px2 + pad_x,
+                py2 + pad_y,
+            )
+            should_attach = _boxes_overlap_px((ox1, oy1, ox2, oy2), near)
+
+        if should_attach and best_person >= 0:
             logger.info(
-                '  Attaching PROP source=%r label=%r to person %d',
+                '  Attaching handheld source=%r label=%r to person %d',
                 o_reg.get('source'), o_reg.get('label'), best_person,
             )
             person_to_props[best_person].append(o_reg)
@@ -547,47 +598,39 @@ def segment_characters(image, regions: list, tmp_dir: str):
     for i, region in enumerate(person_regions):
         x1, y1, x2, y2 = _pixel_box_padded(region, img_w, img_h)
         effects = list(region.get('effects') or [])
-
-        # --- try SAM mask ---
-        mask_np = segment_box(img_rgb, [x1, y1, x2, y2])
-        
-        # Merge assigned props
         assigned_props = person_to_props[i]
+
+        # --- try SAM mask on the person box only (do not enlarge it with PROP) ---
+        mask_np = segment_box(img_rgb, [x1, y1, x2, y2])
+
+        # PROP boxes are recorded so inpaint cannot Telea the chicken.
+        # Re-SAM only when the person silhouette missed the handheld;
+        # a second SAM on fried chicken punches holes and looks muddy.
+        extra_px = [
+            _pixel_box_padded(prop, img_w, img_h, pad=0.02)
+            for prop in assigned_props
+        ]
         if mask_np is not None and assigned_props:
             for prop in assigned_props:
-                px1, py1, px2, py2 = _pixel_box_padded(prop, img_w, img_h)
+                px1, py1, px2, py2 = _pixel_box_padded(prop, img_w, img_h, pad=0.02)
+                if _mask_fill_ratio(mask_np, px1, py1, px2, py2) >= 0.45:
+                    logger.info(
+                        '  PROP already in person SAM [%d %d %d %d], keep original pixels',
+                        px1, py1, px2, py2,
+                    )
+                    continue
                 prop_mask = segment_box(img_rgb, [px1, py1, px2, py2])
                 if prop_mask is None:
-                    # SAM failed for small prop (e.g., coin).
-                    # Fallback: draw a soft ellipse (better than a rect to avoid sharp background tearing)
-                    logger.info('  Prop SAM failed for prop at [%d %d %d %d] — using soft ellipse fallback', px1, py1, px2, py2)
-                    prop_mask = _np.zeros((img_h, img_w), dtype=_np.uint8)
-                    center = ((px1 + px2) // 2, (py1 + py2) // 2)
-                    axes = ((px2 - px1) // 2, (py2 - py1) // 2)
-                    _cv2.ellipse(prop_mask, center, axes, 0, 0, 360, 255, -1)
-                    prop_mask = _cv2.GaussianBlur(prop_mask, (11, 11), 0)
-
-                # Merge prop mask into character mask and expand bounding box
+                    logger.info('  Skipping handheld SAM miss at [%d %d %d %d]', px1, py1, px2, py2)
+                    continue
                 mask_np = _np.maximum(mask_np, prop_mask)
-                x1 = min(x1, px1)
-                y1 = min(y1, py1)
-                x2 = max(x2, px2)
-                y2 = max(y2, py2)
 
         if mask_np is not None:
-            # --- Step 1: Minimal edge erosion (just removes 1-2px SAM fringe) ---
-            erode_kernel = _np.ones((2, 2), _np.uint8)
-            mask_clean = _cv2.erode(mask_np, erode_kernel, iterations=1)
+            mask_clean = (mask_np > 127).astype(_np.uint8) * 255
 
-            # --- Step 2: Minimal feathering only (7px) ---
-            # Heavy feathering creates semi-transparent edges that reveal the background
-            # person underneath, causing a "ghost / soul-leaving-body" double image.
-            mask_feathered = _cv2.GaussianBlur(mask_clean, (3, 3), 0)
-
-            # Apply feathered mask to full image then crop
             rgba = img_rgb.convert('RGBA')
             r, g, b, a = rgba.split()
-            alpha_ch = _Image.fromarray(mask_feathered, mode='L')
+            alpha_ch = _Image.fromarray(mask_clean, mode='L')
             rgba_masked = _Image.merge('RGBA', (r, g, b, alpha_ch))
             
             # Crop exactly to the non-transparent pixels (this includes the feathered bleed)
@@ -600,9 +643,9 @@ def segment_characters(image, regions: list, tmp_dir: str):
                 crop = rgba_masked.crop((x1, y1, x2, y2))
                 cx1, cy1, cx2, cy2 = x1, y1, x2, y2
 
-            mh, mw = mask_np.shape[:2]
+            mh, mw = mask_clean.shape[:2]
             if mh == img_h and mw == img_w:
-                bg_mask = _np.maximum(bg_mask, mask_np)
+                bg_mask = _np.maximum(bg_mask, mask_clean)
             
             logger.info('Character %d: SAM mask crop (%dx%d) with %d props', char_idx, cx2 - cx1, cy2 - cy1, len(assigned_props))
         else:
@@ -635,6 +678,7 @@ def segment_characters(image, regions: list, tmp_dir: str):
             character_index=char_idx,
             effects=effects,
             source_region=region,
+            hand_boxes=list(extra_px),
         ))
         char_idx += 1
 
@@ -644,8 +688,8 @@ def segment_characters(image, regions: list, tmp_dir: str):
 _PLAQUE_SOURCES = {'card', 'button', 'title'}
 _UI_CUTOUT_SOURCES = {'card', 'button', 'title', 'manual', 'prop'}
 _PIXEL_MOTION = {
-    'float', 'float-glow', 'breathe', 'natural-breathe', 'zoom', 'zoom-in',
-    'bounce', 'shake', 'wave', 'spin', 'slide-left', 'slide-up',
+    'float', 'float-glow', 'breathe', 'natural-breathe', 'zoom', 'zoom-in', 'pulse',
+    'bounce', 'shake', 'wave', 'spin', 'slide-left', 'slide-up', 'tilt',
 }
 
 
@@ -883,10 +927,12 @@ def inpaint_masked(image, mask, protect_mask=None):
     if protect_mask is not None:
         protect = np.array(protect_mask) if hasattr(protect_mask, 'size') else protect_mask
         if protect.shape[:2] == hole.shape[:2] and protect.max() > 0:
+            # Wide halo: VIP-card Telea next to the bucket is what muddied
+            # the chicken after PROP was applied.
             protect_bin = cv2.dilate(
-                (protect > 16).astype(np.uint8) * 255,
-                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
-                iterations=1,
+                (protect > 127).astype(np.uint8) * 255,
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)),
+                iterations=2,
             )
             hole = cv2.bitwise_and(hole, cv2.bitwise_not(protect_bin))
     if hole.max() == 0:
@@ -896,9 +942,42 @@ def inpaint_masked(image, mask, protect_mask=None):
     if protect_mask is not None:
         protect = np.array(protect_mask) if hasattr(protect_mask, 'size') else protect_mask
         if protect.shape[:2] == out.shape[:2]:
-            keep = protect > 16
+            keep = protect > 127
             out[keep] = rgb[keep]
     return _Image.fromarray(out)
+
+
+def protect_person_pixels(person_mask, characters, img_w, img_h):
+    """Keep original person / chicken / handheld pixels out of Telea.
+
+    SAM often misses fried-chicken crumbs. Those holes must still be the
+    poster, not an inpainted smear from the nearby VIP card.
+    """
+    import cv2
+    import numpy as np
+    from PIL import Image as _Image
+
+    protect = np.zeros((img_h, img_w), dtype=np.uint8)
+    if person_mask is not None:
+        arr = np.array(person_mask)
+        if arr.shape[:2] == (img_h, img_w):
+            protect = np.maximum(protect, (arr > 127).astype(np.uint8) * 255)
+    for layer in characters or []:
+        region = getattr(layer, 'source_region', None)
+        if region:
+            x1, y1, x2, y2 = _pixel_box_padded(region, img_w, img_h, pad=0.06)
+            protect[y1:y2, x1:x2] = 255
+        for box in getattr(layer, 'hand_boxes', None) or []:
+            x1, y1, x2, y2 = [int(v) for v in box]
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(img_w, x2), min(img_h, y2)
+            if x2 > x1 and y2 > y1:
+                protect[y1:y2, x1:x2] = 255
+    if protect.max() == 0:
+        return person_mask
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    protect = cv2.dilate(protect, kernel, iterations=2)
+    return _Image.fromarray(protect, mode='L')
 
 
 def _carve_person_from_ui_mask(card_mask, person_mask):
@@ -1017,7 +1096,9 @@ def knock_card_glow_off_characters(characters, cutout_mask, img_w, img_h, cutout
         front_patch = _fit(front)
         card_patch = _fit(card_bin)
         alpha = arr[:, :, 3]
-        knock = (halo_patch & (alpha < 242)) | (front_patch & card_patch)
+        # Opaque chicken / sleeve / hair stay. Only knock leftover card bloom.
+        # Zeroing solid pixels over the table VIP is what smeared the bucket.
+        knock = (halo_patch | (front_patch & card_patch)) & (alpha < 242)
         arr[:, :, 3] = np.where(knock, 0, alpha)
         _Image.fromarray(arr).save(path)
 
@@ -1089,6 +1170,9 @@ def segment_ui_cutouts(image, regions: list, tmp_dir: str, person_mask=None):
         if source not in _UI_CUTOUT_SOURCES or not _wants_pixel_motion(region):
             leftover.append(region)
             continue
+        if source != 'card' and _region_hits_person_mask(region, person_mask, img_w, img_h):
+            leftover.append(region)
+            continue
 
         pad = 0.02 if source in _PLAQUE_SOURCES else 0.03
         x1, y1, x2, y2 = _pixel_box_padded(region, img_w, img_h, pad=pad)
@@ -1153,11 +1237,14 @@ def segment_ui_cutouts(image, regions: list, tmp_dir: str, person_mask=None):
 
     leftover = [
         r for r in leftover
-        if (r.get('source') or '').lower() == 'prop'
-        or (
-            not _sits_on_plaque(r, plaque_regions)
-            and not _is_card_art_prop(r, plaque_regions)
-            and not _covered_by_cutouts(r, layers)
+        if not _region_hits_person_mask(r, person_mask, img_w, img_h)
+        and (
+            (r.get('source') or '').lower() == 'prop'
+            or (
+                not _sits_on_plaque(r, plaque_regions)
+                and not _is_card_art_prop(r, plaque_regions)
+                and not _covered_by_cutouts(r, layers)
+            )
         )
     ]
 

@@ -25,42 +25,119 @@
     // -----------------------------------------------------------------------
     const EFFECT_GROUPS = [
         {
-            label: 'Character Dynamics',
-            forPerson: true,
+            label: 'Motion',
+            for: 'person',
             effects: [
                 { key: 'breathe', label: 'Breathe (Expand)' },
-                { key: 'natural-breathe', label: 'Natural Breathe (Vertical)' },
-            ]
+                { key: 'natural-breathe', label: 'Natural Breathe' },
+            ],
         },
         {
-            label: 'UI Animation',
-            forUi: true,
+            label: 'Motion',
+            for: 'ui',
             effects: [
                 { key: 'zoom', label: 'Slow zoom' },
+                { key: 'pulse', label: 'CTA pulse' },
                 { key: 'float', label: 'Idle float' },
             ],
         },
         {
-            label: 'Lighting / Color',
+            label: 'Motion',
+            for: 'prop',
             effects: [
-                { key: 'glow', label: 'Glow pulse' },
-                { key: 'rim', label: 'Rim light' },
-                { key: 'neon_pulse', label: 'Neon Pulse' },
-                { key: 'shine', label: 'Shine sweep' },
-                { key: 'gold_pulse', label: 'Gold pulse' },
-                { key: 'flicker', label: 'Flicker' },
-                { key: 'fade', label: 'Fade pulse' },
-                { key: 'rainbow', label: 'Rainbow Cycle' },
+                { key: 'float', label: 'Idle float' },
+                { key: 'tilt', label: 'Soft tilt' },
             ],
         },
         {
-            label: 'Particle',
+            label: 'Lighting',
+            for: 'person',
             effects: [
-                { key: 'sparkle', label: 'Sparkle' },
-                { key: 'color_shift', label: 'Color shift' },
+                { key: 'glow', label: 'Glow' },
+                { key: 'rim', label: 'Rim light' },
+                { key: 'halo', label: 'Back halo' },
+                { key: 'shine', label: 'Shine sweep' },
+            ],
+        },
+        {
+            label: 'Lighting',
+            for: 'ui',
+            effects: [
+                { key: 'shine', label: 'Shine sweep' },
+                { key: 'sheen', label: 'Text sheen' },
+                { key: 'glow', label: 'Glow' },
+                { key: 'rim', label: 'Rim light' },
+                { key: 'halo', label: 'Back halo' },
+                { key: 'gold_pulse', label: 'Gold pulse' },
+                { key: 'neon_pulse', label: 'Neon pulse' },
+            ],
+        },
+        {
+            label: 'Lighting',
+            for: 'prop',
+            effects: [
+                { key: 'shine', label: 'Shine sweep' },
+                { key: 'sheen', label: 'Text sheen' },
+                { key: 'glow', label: 'Glow' },
+                { key: 'halo', label: 'Back halo' },
+                { key: 'gold_pulse', label: 'Gold pulse' },
+            ],
+        },
+        {
+            label: 'Sparkle',
+            for: 'ui',
+            effects: [
+                { key: 'twinkle', label: 'Corner twinkle' },
+            ],
+        },
+        {
+            label: 'Sparkle',
+            for: 'prop',
+            effects: [
+                { key: 'twinkle', label: 'Corner twinkle' },
             ],
         },
     ];
+
+    const RECOMMEND_PRESETS = [
+        {
+            id: 'person',
+            kicker: 'Person',
+            combo: 'Breathe + Glow',
+            effects: ['breathe', 'glow'],
+            blurb: 'The original expand breathe, plus a halo behind the figure. Face stays unfiltered.',
+        },
+        {
+            id: 'card',
+            kicker: 'Card',
+            combo: 'Slow zoom + Shine',
+            effects: ['zoom', 'shine'],
+            blurb: 'Ken Burns zoom with a light sweep across the bonus card.',
+        },
+        {
+            id: 'prop',
+            kicker: 'Coin / prop',
+            combo: 'Idle float + Shine',
+            effects: ['float', 'shine'],
+            blurb: 'A slight bob and catch-light. Use Attach to Person if it sits in a hand.',
+        },
+    ];
+
+    const DEPRECATED_EFFECTS = {
+        sparkle: true,
+        color_shift: true,
+        rainbow: true,
+        fade: true,
+        flicker: true,
+        bounce: true,
+        shake: true,
+        wave: true,
+        spin: true,
+        'float-glow': true,
+        'slide-up': true,
+        'slide-left': true,
+        'zoom-in': true,
+    };
 
     // -----------------------------------------------------------------------
     // Region state
@@ -101,13 +178,24 @@
         return src === 'card' || src === 'button' || src === 'title' || src === 'ocr';
     }
 
+    function regionKind(item) {
+        const src = ((item && item.source) || '').toLowerCase();
+        const label = ((item && item.label) || '').toLowerCase();
+        if (src === 'yolo' || src === 'sam' || label.includes('person') || label.includes('character')) {
+            return 'person';
+        }
+        if (src === 'prop') {
+            return 'prop';
+        }
+        return 'card';
+    }
+
     function sanitizeEffects(effects, source) {
         const list = Array.isArray(effects) ? effects.slice() : [];
-        if (!isUiSource(source)) {
-            return list;
-        }
         return list.filter(function (key) {
-            return !UI_BLOCKED_MOTION[key];
+            if (DEPRECATED_EFFECTS[key]) return false;
+            if (isUiSource(source) && UI_BLOCKED_MOTION[key]) return false;
+            return true;
         });
     }
 
@@ -263,9 +351,9 @@
                         'background-size: ' + bgSize + '; ' +
                         'background-position: ' + bgPosX + ' ' + bgPosY + ';';
 
-        const isPerson = ['sam', 'yolo'].includes((item.source || '').toLowerCase()) || 
-                         (item.label || '').toLowerCase().includes('person');
-        const isProp = item.source === 'prop';
+        const kind = regionKind(item);
+        const isPerson = kind === 'person';
+        const isProp = kind === 'prop';
 
         // For non-person, non-prop regions, show an "Attach to Person" toggle
         if (!isPerson) {
@@ -278,18 +366,13 @@
         }
 
         EFFECT_GROUPS.forEach(function (group) {
-            // Filter groups based on region type
-            if (isPerson && group.forUi) return;
-            if (!isPerson && group.forPerson) return;
+            if (group.for && group.for !== kind && !(kind === 'card' && group.for === 'ui')) {
+                return;
+            }
 
             html += '<div class="effect-group"><div class="effect-group-label">' + group.label + '</div>';
             html += '<div class="effect-grid">';
             group.effects.forEach(function (effect) {
-                // Hide opacity-based effects for people since they do nothing without inpainting
-                if (isPerson && (effect.key === 'fade' || effect.key === 'flicker')) {
-                    return;
-                }
-                
                 const checked = current.has(effect.key) ? ' checked' : '';
                 html += '<label class="effect-option" title="Preview: ' + effect.label + '">'
                      +  '<input type="checkbox" class="region-effect-check"'
@@ -300,6 +383,24 @@
             });
             html += '</div></div>';
         });
+
+        html += '<div class="effect-recommend">';
+        html += '<div class="effect-group-label">Recommended</div>';
+        html += '<div class="recommend-list">';
+        RECOMMEND_PRESETS.forEach(function (preset) {
+            const match = preset.id === kind || (preset.id === 'card' && kind === 'card');
+            html += '<div class="recommend-card' + (match ? ' is-match' : '') + '">'
+                 +  '<div class="recommend-kicker">' + preset.kicker + '</div>'
+                 +  '<div class="recommend-combo">' + preset.combo + '</div>'
+                 +  '<p>' + preset.blurb + '</p>';
+            if (match) {
+                html += '<button type="button" class="btn btn-secondary recommend-apply" data-preset="' + preset.id + '">Apply this combo</button>';
+            } else {
+                html += '<p class="recommend-hint">Select a ' + preset.kicker.toLowerCase() + ' region to apply.</p>';
+            }
+            html += '</div>';
+        });
+        html += '</div></div>';
 
         effectPanel.innerHTML = html;
 
@@ -341,6 +442,20 @@
                 renderEffectPanel();  // re-render panel to reflect change
             });
         }
+
+        effectPanel.querySelectorAll('.recommend-apply').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                const presetId = btn.getAttribute('data-preset');
+                const preset = RECOMMEND_PRESETS.filter(function (item) {
+                    return item.id === presetId;
+                })[0];
+                if (!preset || selected < 0) return;
+                regions[selected].effects = preset.effects.slice();
+                syncHidden();
+                renderList();
+                renderEffectPanel();
+            });
+        });
     }
 
     function escapeHtml(str) {

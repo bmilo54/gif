@@ -10,6 +10,8 @@ from apps.projects.services.preprocessing import load_preprocessed_image
 from apps.projects.services.segmentation import (
     inpaint_masked,
     knock_card_glow_off_characters,
+    overlaps_character,
+    protect_person_pixels,
     segment_characters,
     segment_ui_cutouts,
 )
@@ -143,10 +145,19 @@ def generate_gif(job):
                     cutouts=cutouts,
                 )
 
-            # Inpaint only card holes. Person SAM still composites on the
-            # original poster pixels, same as before.
+            person_regions = [c.source_region for c in characters if c.source_region]
+            leftover = [
+                r for r in leftover
+                if not overlaps_character(r, person_regions)
+            ]
+
+            # Card holes only. Never Telea the person box, chicken, or PROP.
+            # That inpaint is what made the bucket look smeared after PROP.
             if cutouts:
-                background = inpaint_masked(image, cutout_mask, protect_mask=person_mask)
+                protect = protect_person_pixels(
+                    person_mask, characters, image.width, image.height,
+                )
+                background = inpaint_masked(image, cutout_mask, protect_mask=protect)
                 logger.info('Segmented %d UI cut-out(s) for job %s', len(cutouts), job.pk)
             else:
                 background = image.convert('RGB')

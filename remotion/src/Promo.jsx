@@ -1,5 +1,4 @@
 import React from "react";
-import { Lottie } from "@remotion/lottie";
 import {
   AbsoluteFill,
   Easing,
@@ -11,8 +10,7 @@ import {
   useVideoConfig,
 } from "remotion";
 
-import sparkleData from "./lottie/sparkle.json";
-import { computeEffectStyle, needsLottie } from "./effects/registry";
+import { computeEffectStyle } from "./effects/registry";
 
 function assetSrc(src) {
   if (!src) return null;
@@ -27,15 +25,11 @@ function assetSrc(src) {
   return staticFile(src);
 }
 
-const LOTTIE_PRESETS = {
-  sparkle: sparkleData,
-};
-
 const PERSON_SOURCES = new Set(["yolo", "sam"]);
 const UI_SOURCES = new Set(["card", "button", "title", "ocr", "prop", "manual"]);
 const PIXEL_MOTION = new Set([
-  "float", "float-glow", "breathe", "natural-breathe", "zoom", "zoom-in",
-  "bounce", "shake", "wave", "spin", "slide-left", "slide-up",
+  "float", "float-glow", "breathe", "natural-breathe", "zoom", "zoom-in", "pulse",
+  "bounce", "shake", "wave", "spin", "slide-left", "slide-up", "tilt",
 ]);
 
 function isPersonRegion(region) {
@@ -84,6 +78,56 @@ function useLoopWave() {
   });
 }
 
+function CornerTwinkle({ region, canvasW, canvasH }) {
+  const frame = useCurrentFrame();
+  const { durationInFrames } = useVideoConfig();
+  const { left, top, width, height, radius } = boxPixels(region, canvasW, canvasH);
+  const t = frame / Math.max(durationInFrames, 1);
+  const pad = Math.min(width, height) * 0.16;
+  const star = Math.max(6, Math.min(12, Math.min(width, height) * 0.08));
+  const spots = [
+    { x: pad, y: pad, phase: 0 },
+    { x: width - pad, y: pad, phase: 0.28 },
+    { x: pad, y: height - pad, phase: 0.52 },
+    { x: width - pad, y: height - pad, phase: 0.76 },
+  ];
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left,
+        top,
+        width,
+        height,
+        overflow: "hidden",
+        borderRadius: radius,
+        pointerEvents: "none",
+      }}
+    >
+      {spots.map((spot, index) => {
+        const pulse = 0.2 + 0.8 * (0.5 + 0.5 * Math.sin((t + spot.phase) * Math.PI * 2));
+        return (
+          <div
+            key={index}
+            style={{
+              position: "absolute",
+              left: spot.x - star / 2,
+              top: spot.y - star / 2,
+              width: star,
+              height: star,
+              opacity: pulse,
+              background:
+                "radial-gradient(circle, rgba(255,248,220,0.95) 0%, rgba(255,210,90,0.7) 38%, transparent 70%)",
+              mixBlendMode: "screen",
+            }}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
 function ShineBand({ region, canvasW, canvasH }) {
   const frame = useCurrentFrame();
   const { durationInFrames } = useVideoConfig();
@@ -113,6 +157,41 @@ function ShineBand({ region, canvasW, canvasH }) {
           position: "absolute",
           inset: 0,
           background: `linear-gradient(115deg, transparent 0%, transparent ${sweep}%, rgba(255, 236, 180, 0) ${sweep}%, rgba(255, 236, 180, 0.72) ${sweep + 8}%, rgba(255, 210, 90, 0) ${sweep + 18}%, transparent 100%)`,
+        }}
+      />
+    </div>
+  );
+}
+
+function SheenBand({ region, canvasW, canvasH }) {
+  const frame = useCurrentFrame();
+  const { durationInFrames } = useVideoConfig();
+  const { left, top, width, height, radius } = boxPixels(region, canvasW, canvasH);
+  const sweep = interpolate(frame, [0, Math.max(durationInFrames, 1)], [-15, 120], {
+    easing: Easing.inOut(Easing.quad),
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left,
+        top,
+        width,
+        height,
+        overflow: "hidden",
+        borderRadius: radius,
+        pointerEvents: "none",
+        mixBlendMode: "screen",
+      }}
+    >
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          background: `linear-gradient(115deg, transparent 0%, transparent ${sweep}%, rgba(255, 255, 255, 0) ${sweep}%, rgba(255, 248, 220, 0.95) ${sweep + 3}%, rgba(255, 210, 90, 0) ${sweep + 8}%, transparent 100%)`,
         }}
       />
     </div>
@@ -157,37 +236,6 @@ function RimGlow({ region, canvasW, canvasH, strength }) {
   );
 }
 
-function LottieOverlay({ region, animationData, canvasW, canvasH, dur }) {
-  const { left, top, width, height, radius } = boxPixels(region, canvasW, canvasH);
-  const ip = Number(animationData.ip) || 0;
-  const op = Number(animationData.op) || 60;
-  const playbackRate = (op - ip) / Math.max(dur, 1);
-
-  return (
-    <div
-      style={{
-        position: "absolute",
-        left,
-        top,
-        width,
-        height,
-        overflow: "hidden",
-        borderRadius: radius,
-        pointerEvents: "none",
-        mixBlendMode: "screen",
-      }}
-    >
-      <Lottie
-        animationData={animationData}
-        playbackRate={playbackRate}
-        loop
-        style={{ width: "100%", height: "100%" }}
-        preserveAspectRatio="xMidYMid meet"
-      />
-    </div>
-  );
-}
-
 function wantsPixelMotion(effects) {
   return (effects || []).some((key) => PIXEL_MOTION.has(key));
 }
@@ -195,9 +243,7 @@ function wantsPixelMotion(effects) {
 function OverlayFX({ region, canvasW, canvasH, dur, wave, faceWash = true }) {
   const effects = region.effects || [];
   const glowColor = interpolateColors(wave, [0, 1], ["rgba(255, 236, 180, 0.0)", "rgba(255, 236, 180, 0.32)"]);
-  const goldColor = interpolateColors(wave, [0, 1], ["rgba(255, 214, 110, 0.0)", "rgba(255, 214, 110, 0.38)"]);
   const wash = faceWash && hasEffect(effects, "glow");
-  const goldWash = faceWash && hasEffect(effects, "gold_pulse");
   const rim = faceWash && hasEffect(effects, "rim");
 
   return (
@@ -211,35 +257,18 @@ function OverlayFX({ region, canvasW, canvasH, dur, wave, faceWash = true }) {
           opacity={1}
         />
       ) : null}
-      {goldWash ? (
-        <GlowWash
-          region={region}
-          canvasW={canvasW}
-          canvasH={canvasH}
-          color={goldColor}
-          opacity={1}
-        />
-      ) : null}
       {hasEffect(effects, "shine") ? (
         <ShineBand region={region} canvasW={canvasW} canvasH={canvasH} />
+      ) : null}
+      {hasEffect(effects, "sheen") ? (
+        <SheenBand region={region} canvasW={canvasW} canvasH={canvasH} />
       ) : null}
       {rim ? (
         <RimGlow region={region} canvasW={canvasW} canvasH={canvasH} strength={wave} color={region.color || glowColor} />
       ) : null}
-      {needsLottie(effects)
-        ? Object.entries(LOTTIE_PRESETS)
-            .filter(([key]) => effects.includes(key))
-            .map(([key, data]) => (
-              <LottieOverlay
-                key={`lottie-${key}`}
-                region={region}
-                animationData={data}
-                canvasW={canvasW}
-                canvasH={canvasH}
-                dur={dur}
-              />
-            ))
-        : null}
+      {hasEffect(effects, "twinkle") ? (
+        <CornerTwinkle region={region} canvasW={canvasW} canvasH={canvasH} />
+      ) : null}
     </>
   );
 }
@@ -298,22 +327,41 @@ function hexToGlow(color, alpha) {
 
 function CharacterLayer({ character, canvasW, canvasH, frame, dur, wave }) {
   const effects = character.effects || [];
-  const motion = wantsPixelMotion(effects);
   const color = character.color || "#ffecb4";
-  const effectStyle = motion ? computeEffectStyle(effects, frame, dur, color) : {};
+  // Person motion is only the set breathe / natural-breathe scale.
+  // Float and other translateY keys make the cut-out bob — that is not breathe.
+  const personMotion = effects.filter(
+    (key) => key === "breathe" || key === "natural-breathe"
+  );
+  const effectStyle = personMotion.length
+    ? computeEffectStyle(personMotion, frame, dur, color)
+    : {};
   // Filters on the wrapper recolor skin. Keep motion only; glow stays behind.
-  const { filter: _ignoreFilter, ...motionStyle } = effectStyle;
+  const { filter: _ignoreFilter, opacity: _ignoreOpacity, ...motionStyle } = effectStyle;
 
   const left = character.bbox.x * canvasW;
   const top = character.bbox.y * canvasH;
   const width = character.bbox.width * canvasW;
   const height = character.bbox.height * canvasH;
 
-  const wantsHalo = hasEffect(effects, "glow") || hasEffect(effects, "rim");
-  const spread = 6 + 8 * wave;
+  const wantsHalo =
+    hasEffect(effects, "glow") ||
+    hasEffect(effects, "rim") ||
+    hasEffect(effects, "halo");
+  const spread = hasEffect(effects, "halo") ? 16 + 14 * wave : 6 + 8 * wave;
   const halo = hexToGlow(color, 0.35 + 0.2 * wave);
   const src = assetSrc(character.src);
   const fillStyle = { width: "100%", height: "100%", objectFit: "fill" };
+  const maskStyle = src
+    ? {
+        WebkitMaskImage: `url(${src})`,
+        maskImage: `url(${src})`,
+        WebkitMaskSize: "100% 100%",
+        maskSize: "100% 100%",
+        WebkitMaskRepeat: "no-repeat",
+        maskRepeat: "no-repeat",
+      }
+    : {};
 
   return (
     <div
@@ -341,6 +389,24 @@ function CharacterLayer({ character, canvasW, canvasH, frame, dur, wave }) {
         />
       ) : null}
       <Img src={src} style={{ ...fillStyle, position: "relative" }} />
+      {src ? (
+        <div style={{ position: "absolute", inset: 0, ...maskStyle }}>
+          <OverlayFX
+            region={{
+              ...character,
+              x: 0,
+              y: 0,
+              width: 1,
+              height: 1,
+            }}
+            canvasW={width}
+            canvasH={height}
+            dur={dur}
+            wave={wave}
+            faceWash={false}
+          />
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -350,7 +416,7 @@ function CutoutLayer({ cutout, canvasW, canvasH, frame, dur, wave }) {
   const motion = wantsPixelMotion(effects);
   const color = cutout.color || "#ffecb4";
   const effectStyle = motion ? computeEffectStyle(effects, frame, dur, color) : {};
-  const { filter: _ignoreFilter, ...motionStyle } = effectStyle;
+  const { filter: _ignoreFilter, opacity: _ignoreOpacity, ...motionStyle } = effectStyle;
   const left = cutout.bbox.x * canvasW;
   const top = cutout.bbox.y * canvasH;
   const width = cutout.bbox.width * canvasW;
@@ -366,10 +432,15 @@ function CutoutLayer({ cutout, canvasW, canvasH, frame, dur, wave }) {
 
   const hasGlow =
     hasEffect(effects, "glow") ||
+    hasEffect(effects, "rim") ||
+    hasEffect(effects, "halo") ||
     hasEffect(effects, "gold_pulse") ||
-    hasEffect(effects, "rim");
-  const spread = 6 + 10 * wave;
-  const filterStyle = hasGlow ? `drop-shadow(0px 0px ${spread}px ${color})` : undefined;
+    hasEffect(effects, "neon_pulse");
+  const spread = hasEffect(effects, "halo") ? 16 + 16 * wave : 6 + 10 * wave;
+  let shadowColor = color;
+  if (hasEffect(effects, "gold_pulse")) shadowColor = "#ffd26e";
+  if (hasEffect(effects, "neon_pulse")) shadowColor = color || "#00ffc8";
+  const filterStyle = hasGlow ? `drop-shadow(0px 0px ${spread}px ${shadowColor})` : undefined;
 
   const cutoutSrc = assetSrc(cutout.src);
   const maskStyle = cutoutSrc

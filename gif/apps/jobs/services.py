@@ -6,7 +6,12 @@ from django.db import transaction
 from apps.projects.choices import SOURCE_MANUAL
 from apps.projects.models import DetectionObject
 
-from .choices import DEFAULT_ANIMATION_TYPES, ANIMATION_TYPE_CHOICES, ANIMATION_TYPE_LABELS
+from .choices import (
+    DEFAULT_ANIMATION_TYPES,
+    ANIMATION_TYPE_CHOICES,
+    ANIMATION_TYPE_LABELS,
+    DEPRECATED_EFFECTS,
+)
 
 UI_SOURCES = frozenset({'card', 'button', 'title', 'ocr'})
 UI_BLOCKED_MOTION = frozenset({
@@ -120,7 +125,10 @@ def parse_regions(raw):
         box = _clamp_region(item)
         # Preserve per-region effects; silently ignore unknown keys.
         raw_effects = item.get('effects') or []
-        effects = [e for e in raw_effects if e in allowed_effects]
+        effects = [
+            e for e in raw_effects
+            if e in allowed_effects and e not in DEPRECATED_EFFECTS
+        ]
         if str(item.get('source') or '').lower() in UI_SOURCES:
             effects = [e for e in effects if e not in UI_BLOCKED_MOTION]
         color = item.get('color')
@@ -143,6 +151,8 @@ def snapshot_regions(detections, manual_regions):
         src = (source or '').lower()
         if src in ('yolo', 'sam') or 'person' in lbl or 'character' in lbl:
             return ['breathe']
+        if src == 'prop':
+            return ['float', 'shine']
         return ['zoom', 'shine']
 
     regions = []
