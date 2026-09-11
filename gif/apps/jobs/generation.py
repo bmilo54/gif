@@ -58,6 +58,26 @@ def _regions_payload(detections):
     return payload
 
 
+def _cutout_origin(bbox, characters):
+    """Zoom away from the person so the card does not grow over the fingers."""
+    if not bbox or not characters:
+        return 'center'
+    left = float(bbox.get('x') or 0)
+    width = float(bbox.get('width') or 0)
+    cx = left + width * 0.5
+    for layer in characters:
+        box = getattr(layer, 'bbox_norm', None)
+        if not box:
+            continue
+        px = float(box.get('x') or 0)
+        pr = px + float(box.get('width') or 0)
+        if pr <= cx + width * 0.15:
+            return 'right'
+        if px >= cx - width * 0.15:
+            return 'left'
+    return 'center'
+
+
 def _save_job_outputs(job, gif_bytes, video_bytes, frame_count):
     project = job.project
     stem = f"{project.project_id or 'project'}_v{job.version}"
@@ -131,7 +151,11 @@ def generate_gif(job):
         tmp = tempfile.mkdtemp(prefix='remotion-job-')
         try:
             poster_path = os.path.join(tmp, 'poster.png')
+            original_path = os.path.join(tmp, 'original.png')
             mp4_path = os.path.join(tmp, 'out.mp4')
+
+            # Save original image (pre-inpaint) so OCR zoom can use real pixels
+            image.convert('RGB').save(original_path, format='PNG')
 
             characters, person_mask, leftover = segment_characters(
                 image, detections, tmp
@@ -187,6 +211,7 @@ def generate_gif(job):
                     'source': (c.source_region.get('source') or 'card').lower(),
                     'label': c.source_region.get('label') or '',
                     'front': bool(c.source_region.get('front')),
+                    'origin': _cutout_origin(c.bbox_norm, characters),
                 }
                 for c in cutouts
             ]
@@ -201,6 +226,7 @@ def generate_gif(job):
                 output_mp4=mp4_path,
                 characters=characters_payload,
                 cutouts=cutouts_payload,
+                original_path=original_path,
             )
 
             with open(mp4_path, 'rb') as handle:

@@ -273,8 +273,17 @@ if not os.path.exists(SAM_MODEL):
     _sam_fallback = os.path.join(BASE_DIR, 'sam2.1_t.pt')
     if os.path.exists(_sam_fallback):
         SAM_MODEL = _sam_fallback
-# Crop-level background removal on Replicate if local SAM is missing.
-REPLICATE_CUTOUT_MODEL = os.environ.get('REPLICATE_CUTOUT_MODEL', 'cjwbw/rembg')
+# Card/object cut-out. Must include :version — replicate 1.x 404s on
+# POST /v1/models/owner/name/predictions for these community models.
+REPLICATE_PLAQUE_MODEL = os.environ.get(
+    'REPLICATE_PLAQUE_MODEL',
+    'schananas/grounded_sam:ee871c19efb1941f55f66a3d7d960428c8a5afcb77449547fe8e5a3ab9ebc21c',
+)
+REPLICATE_CUTOUT_MODEL = os.environ.get(
+    'REPLICATE_CUTOUT_MODEL',
+    'sprited/birefnet:21f2c4a9159af128ab9b9126401eebe7f8c5310841ed628b74a4c462df00da67',
+)
+REPLICATE_CUTOUT_VARIANT = os.environ.get('REPLICATE_CUTOUT_VARIANT', 'toonout')
 SAM3_ENABLED = False
 SAM3_MODEL = os.path.join(BASE_DIR, 'ml_models', 'sam3.pt')
 SAM_CONCEPT_FALLBACK = True
@@ -331,7 +340,7 @@ PADDLEOCR_USE_TEXTLINE_ORIENTATION = False
 
 # GIF generation. Boxes are normalised, so downscaling the source here only
 # affects output file size, not the selected regions.
-GIF_MAX_SIDE = 720
+GIF_MAX_SIDE = 1250
 GIF_FRAME_COUNT = 60   # 2-second loop at 30 fps
 GIF_DURATION_MS = 33   # ≈ 30 fps — enough for all sin-wave effects to complete cleanly
 GIF_GLOW = 0.35

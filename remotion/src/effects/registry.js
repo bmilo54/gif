@@ -81,8 +81,9 @@ const REGISTRY = {
 
   zoom: {
     kind: "motion",
+    // Cards need a visible Ken Burns. 1.5% looked like shine-only.
     compute(frame, dur) {
-      const s = 1 + interpolate(wave(frame, dur), [0, 1], [0, 0.03], {
+      const s = 1 + interpolate(wave(frame, dur), [0, 1], [0, 0.04], {
         extrapolateLeft: "clamp",
         extrapolateRight: "clamp",
       });

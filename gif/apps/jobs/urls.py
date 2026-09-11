@@ -17,4 +17,9 @@ urlpatterns = [
         views.AnimationJobGenerateView.as_view(),
         name='job_generate',
     ),
+    path(
+        r'jobs/<int:pk>/download.gif',
+        views.AnimationJobDownloadGifView.as_view(),
+        name='job_download_gif',
+    ),
 ]

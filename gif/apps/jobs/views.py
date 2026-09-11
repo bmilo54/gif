@@ -1,8 +1,10 @@
 import logging
+import os
 
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.http import FileResponse, Http404, HttpResponse
 from django.shortcuts import redirect
 from django.utils.decorators import method_decorator
 from django.views import View
@@ -11,6 +13,7 @@ from django.views.generic.detail import SingleObjectMixin
 
 from apps.projects.models import Project
 
+from .encoding import compress_gif_bytes
 from .generation import generate_gif
 from .models import AnimationJob
 from .services import (
@@ -102,3 +105,35 @@ class AnimationJobGenerateView(SingleObjectMixin, View):
 
         messages.success(request, f"GIF for v{job.version} is ready.")
         return redirect('jobs:job_detail', pk=job.pk)
+
+
+class AnimationJobDownloadGifView(SingleObjectMixin, View):
+    model = AnimationJob
+    http_method_names = ['get']
+
+    def get(self, request, *args, **kwargs):
+        job = self.get_object()
+        if not job.gif_file:
+            raise Http404('No GIF for this job.')
+        name = job.gif_filename() or 'animation.gif'
+        compress = request.GET.get('compress') in ('1', 'true', 'yes')
+        if not compress:
+            return FileResponse(
+                job.gif_file.open('rb'),
+                as_attachment=True,
+                filename=name,
+                content_type='image/gif',
+            )
+        with job.gif_file.open('rb') as handle:
+            raw = handle.read()
+        try:
+            data = compress_gif_bytes(raw)
+        except Exception:
+            logger.exception('GIF compress failed for job %s', job.pk)
+            data = raw
+        stem, ext = os.path.splitext(name)
+        filename = f'{stem}_compressed{ext or ".gif"}'
+        response = HttpResponse(data, content_type='image/gif')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        response['Content-Length'] = str(len(data))
+        return response

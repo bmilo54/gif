@@ -87,7 +87,8 @@
         <div class="card-footer">
             <div class="actions-primary">
                 {% if job.gif_file %}
-                    <a class="btn" href="{{ job.gif_file.url }}" download>Download GIF</a>
+                    <a class="btn" href="{% url 'jobs:job_download_gif' pk=job.pk %}">Download GIF</a>
+                    <a class="btn btn-secondary" href="{% url 'jobs:job_download_gif' pk=job.pk %}?compress=1">Download compressed</a>
                 {% endif %}
                 {% if job.video_file %}
                     <a class="btn btn-secondary" href="{{ job.video_file.url }}" download>Download MP4</a>

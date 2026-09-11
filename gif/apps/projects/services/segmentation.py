@@ -14,6 +14,7 @@ import os
 from django.conf import settings
 
 from ..choices import SOURCE_PROP
+from . import replicate_util
 from .detectors import Detection
 
 logger = logging.getLogger(__name__)
@@ -146,42 +147,10 @@ def segment_box(image, box_xyxy):
     return mask
 
 
-def _segment_box_rembg(image, box_xyxy):
-    """
-    Replicate rembg on the cropped box. Better than full-image automatic SAM
-    for a single ornate card: the crop is small, the marble is treated as
-    background, the gold plaque + crown stay in the alpha channel.
-    """
+def _replicate_output_bytes(output):
+    """Turn a Replicate file / URL / list into PNG bytes."""
     import base64
-    import io
-    import numpy as np
-    from PIL import Image as _Image
-
-    token = getattr(settings, 'REPLICATE_API_TOKEN', '')
-    model = getattr(settings, 'REPLICATE_CUTOUT_MODEL', '')
-    if not token or not model:
-        return None
-    try:
-        import replicate
-    except ImportError:
-        return None
-
-    os.environ['REPLICATE_API_TOKEN'] = token
-    width, height = image.size
-    x1, y1, x2, y2 = [int(round(v)) for v in box_xyxy]
-    x1, y1 = max(0, x1), max(0, y1)
-    x2, y2 = min(width, x2), min(height, y2)
-    if x2 <= x1 or y2 <= y1:
-        return None
-    crop = image.convert('RGB').crop((x1, y1, x2, y2))
-    buf = io.BytesIO()
-    crop.save(buf, format='PNG')
-    data_uri = 'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode('ascii')
-    try:
-        output = replicate.run(model, input={'image': data_uri})
-    except Exception:
-        logger.exception('Replicate rembg cut-out failed')
-        return None
+    import urllib.request
 
     raw = output
     if hasattr(output, 'read'):
@@ -190,24 +159,155 @@ def _segment_box_rembg(image, box_xyxy):
         raw = output[0]
         if hasattr(raw, 'read'):
             raw = raw.read()
-        elif isinstance(raw, str) and raw.startswith('http'):
-            import urllib.request
-            with urllib.request.urlopen(raw, timeout=60) as resp:
-                raw = resp.read()
+        elif hasattr(raw, 'url'):
+            raw = raw.url
+    elif hasattr(output, 'url'):
+        raw = output.url
+    if isinstance(raw, str) and raw.startswith('http'):
+        with urllib.request.urlopen(raw, timeout=60) as resp:
+            raw = resp.read()
     if isinstance(raw, str) and raw.startswith('data:'):
         raw = base64.b64decode(raw.split(',', 1)[-1])
-    if not isinstance(raw, (bytes, bytearray)):
+    if isinstance(raw, (bytes, bytearray)):
+        return bytes(raw)
+    return None
+
+
+def _padded_xyxy(box_xyxy, width, height, pad_frac):
+    x1, y1, x2, y2 = [int(round(v)) for v in box_xyxy]
+    bw, bh = max(1, x2 - x1), max(1, y2 - y1)
+    px, py = int(bw * pad_frac), int(bh * pad_frac)
+    return (
+        max(0, x1 - px),
+        max(0, y1 - py),
+        min(width, x2 + px),
+        min(height, y2 + py),
+    )
+
+
+def _image_data_uri(image):
+    import base64
+    import io
+
+    buf = io.BytesIO()
+    image.convert('RGB').save(buf, format='PNG')
+    return 'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode('ascii')
+
+
+def _png_to_alpha(raw, size):
+    import io
+    import numpy as np
+    from PIL import Image as _Image
+
+    if not raw:
         return None
-    cut = _Image.open(io.BytesIO(raw)).convert('RGBA')
-    if cut.size != crop.size:
-        cut = cut.resize(crop.size, _Image.Resampling.LANCZOS)
-    alpha = np.array(cut.split()[-1])
-    if (alpha > 16).sum() < 50:
-        return None
+    cut = _Image.open(io.BytesIO(raw))
+    if cut.mode == 'L':
+        alpha = np.array(cut)
+    elif cut.mode == 'RGBA':
+        alpha = np.array(cut.split()[-1])
+    else:
+        alpha = np.array(cut.convert('L'))
+    if cut.size != size:
+        alpha = np.array(
+            _Image.fromarray(alpha, mode='L').resize(size, _Image.Resampling.NEAREST)
+        )
+    return alpha
+
+
+def _place_crop_mask(alpha, crop_xyxy, box_xyxy, width, height):
+    """Paste a crop matte onto the full canvas, then clip to the card box."""
+    import numpy as np
+
+    cx1, cy1, cx2, cy2 = crop_xyxy
+    x1, y1, x2, y2 = [int(round(v)) for v in box_xyxy]
     full = np.zeros((height, width), dtype=np.uint8)
-    full[y1:y2, x1:x2] = alpha
-    logger.info('Replicate rembg mask OK for box [%s %s %s %s]', x1, y1, x2, y2)
-    return full
+    full[cy1:cy2, cx1:cx2] = alpha
+    clipped = np.zeros_like(full)
+    clipped[y1:y2, x1:x2] = full[y1:y2, x1:x2]
+    if (clipped > 16).sum() < 50:
+        return None
+    return clipped
+
+
+def _segment_box_grounded_sam(image, box_xyxy, *, prompt=None, negative=None):
+    """Text-prompted card/object mask. Never used for the person layer."""
+    model = getattr(settings, 'REPLICATE_PLAQUE_MODEL', 'schananas/grounded_sam')
+    if not replicate_util.client() or not model:
+        return None
+
+    width, height = image.size
+    crop_box = _padded_xyxy(box_xyxy, width, height, pad_frac=0.16)
+    cx1, cy1, cx2, cy2 = crop_box
+    if cx2 <= cx1 or cy2 <= cy1:
+        return None
+    crop = image.convert('RGB').crop(crop_box)
+    payload = {
+        'image': _image_data_uri(crop),
+        'mask_prompt': prompt or getattr(
+            settings, 'REPLICATE_PLAQUE_PROMPT',
+            'bonus card, neon plaque, rectangular sign, game card',
+        ),
+        'negative_mask_prompt': negative or getattr(
+            settings, 'REPLICATE_PLAQUE_NEGATIVE',
+            'person, hand, finger, face, hair, background',
+        ),
+        'adjustment_factor': -4,
+    }
+    output = replicate_util.run(model, payload)
+    if output is None:
+        return None
+
+    raw = _replicate_output_bytes(output)
+    alpha = _png_to_alpha(raw, crop.size)
+    if alpha is None:
+        return None
+    placed = _place_crop_mask(alpha, crop_box, box_xyxy, width, height)
+    if placed is None:
+        return None
+    logger.info('Replicate Grounded SAM mask OK for box %s', [int(v) for v in box_xyxy])
+    return placed
+
+
+def _segment_box_rembg(image, box_xyxy, *, variant=None, pad_frac=0.0):
+    """
+    Crop the card box and matte it on Replicate (BiRefNet by default).
+
+    cjwbw/rembg treats the dark plaque as background. BiRefNet keeps the
+    neon frame; we then fill the interior so the card face stays opaque.
+    """
+    model = getattr(settings, 'REPLICATE_CUTOUT_MODEL', '')
+    if not replicate_util.client() or not model:
+        return None
+
+    width, height = image.size
+    crop_box = _padded_xyxy(box_xyxy, width, height, pad_frac)
+    cx1, cy1, cx2, cy2 = crop_box
+    if cx2 <= cx1 or cy2 <= cy1:
+        return None
+    crop = image.convert('RGB').crop(crop_box)
+    payload = {'image': _image_data_uri(crop)}
+    if 'birefnet' in model.lower():
+        payload.update({
+            'variant': variant or getattr(settings, 'REPLICATE_CUTOUT_VARIANT', 'general'),
+            'output_format': 'mask',
+            'resolution': 0,
+            # Do not shrink — mask_offset < 0 eats the neon frame.
+            'mask_offset': 0,
+        })
+    output = replicate_util.run(model, payload)
+    if output is None:
+        return None
+
+    raw = _replicate_output_bytes(output)
+    alpha = _png_to_alpha(raw, crop.size)
+    if alpha is None:
+        return None
+    placed = _place_crop_mask(alpha, crop_box, box_xyxy, width, height)
+    if placed is None:
+        return None
+    logger.info('Replicate %s mask OK for box %s', model, [int(v) for v in box_xyxy])
+    return placed
 
 
 def _detections_from_boxes(boxes, names, source, width, height):
@@ -417,6 +517,23 @@ def _region_hangs_under(inner, outer):
     return iy <= outer_bottom + 0.09 and (iy + ih) >= outer_bottom - 0.05
 
 
+def _region_hangs_off_plaque(inner, outer):
+    """Gift/coins that sit on the card and stick out the right or bottom — not the left (toward the person)."""
+    if _region_hangs_under(inner, outer):
+        return True
+    if _region_fraction_inside(inner, outer) < 0.12:
+        return False
+    ix, iy, iw, ih = _region_box(inner)
+    ox, oy, ow, oh = _region_box(outer)
+    icy = iy + ih / 2.0
+    icx = ix + iw / 2.0
+    if icx < ox:
+        return False
+    on_row = oy - 0.04 <= icy <= oy + oh + 0.04
+    sticks_right = (ix + iw) > ox + ow - 0.02 and ix < ox + ow
+    return on_row and sticks_right
+
+
 def _looks_like_prop(region):
     source = (region.get('source') or '').lower()
     label = (region.get('label') or '').lower()
@@ -445,7 +562,7 @@ def _boxes_overlap_px(a, b):
 def overlaps_character(region, person_regions, pad=0.28):
     """True if this leftover box sits on a person (raised hand, chicken, coins)."""
     src = (region.get('source') or '').lower()
-    if src in _PLAQUE_SOURCES:
+    if src in _PLAQUE_SOURCES or src == 'ocr':
         return False
     for person in person_regions or []:
         outer = _inflate_region(person, pad=pad)
@@ -530,18 +647,20 @@ def segment_characters(image, regions: list, tmp_dir: str):
 
     for j, o_reg in enumerate(other_regions):
         src = (o_reg.get('source') or '').lower()
-        if src in _PLAQUE_SOURCES:
+        if src in _PLAQUE_SOURCES or src == 'ocr':
             continue
         tagged = src == 'prop'
-        # Card decorations stay on the plaque. User-tagged PROP coins in a
-        # hand must not be swallowed just because they sit near a bonus card.
-        if not tagged and (
-            _is_card_art_prop(o_reg, ui_regions) or _sits_on_plaque(o_reg, ui_regions)
-        ):
-            consumed_prop_ids.add(id(o_reg))
-            continue
-
         ox1, oy1, ox2, oy2 = _pixel_box_padded(o_reg, img_w, img_h)
+        on_plaque = _is_card_art_prop(o_reg, ui_regions) or _sits_on_plaque(o_reg, ui_regions)
+        # Card gifts/coins/pills stay on the plaque. Do not attach them to a
+        # person across the poster — that is what made 4 STREAK props look wrong.
+        if on_plaque:
+            overlaps_person = any(
+                _boxes_overlap_px((ox1, oy1, ox2, oy2), person_box)
+                for person_box in person_boxes
+            )
+            if not overlaps_person:
+                continue
 
         best_person = -1
         best_area = 0
@@ -559,17 +678,10 @@ def segment_characters(image, regions: list, tmp_dir: str):
         if best_person < 0 and person_boxes:
             ocx = (ox1 + ox2) / 2.0
             ocy = (oy1 + oy2) / 2.0
-            best_dist = None
             for i, (px1, py1, px2, py2) in enumerate(person_boxes):
                 if px1 <= ocx <= px2 and py1 <= ocy <= py2:
                     best_person = i
                     break
-                pcx = (px1 + px2) / 2.0
-                pcy = (py1 + py2) / 2.0
-                dist = (pcx - ocx) ** 2 + (pcy - ocy) ** 2
-                if best_dist is None or dist < best_dist:
-                    best_dist = dist
-                    best_person = i
 
         should_attach = tagged or _looks_like_prop(o_reg)
         if not should_attach and best_person >= 0 and _is_small_handheld(o_reg):
@@ -583,6 +695,10 @@ def segment_characters(image, regions: list, tmp_dir: str):
                 py2 + pad_y,
             )
             should_attach = _boxes_overlap_px((ox1, oy1, ox2, oy2), near)
+
+        if should_attach and best_person >= 0 and _near_plaque_scene(o_reg, ui_regions):
+            if not _region_center_in(o_reg, person_regions[best_person]):
+                should_attach = False
 
         if should_attach and best_person >= 0:
             logger.info(
@@ -621,11 +737,35 @@ def segment_characters(image, regions: list, tmp_dir: str):
                     continue
                 prop_mask = segment_box(img_rgb, [px1, py1, px2, py2])
                 if prop_mask is None:
-                    logger.info('  Skipping handheld SAM miss at [%d %d %d %d]', px1, py1, px2, py2)
+                    # SAM missed the prop — stamp the bbox directly so the prop
+                    # moves with the character rather than staying on the static poster.
+                    logger.info(
+                        '  SAM miss for prop [%d %d %d %d]; stamping bbox into character mask',
+                        px1, py1, px2, py2,
+                    )
+                    mask_np = _stamp_boxes(mask_np, [(px1, py1, px2, py2)])
                     continue
                 mask_np = _np.maximum(mask_np, prop_mask)
+        elif mask_np is None and assigned_props:
+            # Person SAM itself failed. Stamp all prop bboxes into a fresh mask
+            # so they are included in the rect-fallback character layer.
+            logger.info('  Person SAM failed; stamping %d prop bbox(es) into blank mask', len(assigned_props))
+            blank = _np.zeros((img_h, img_w), dtype=_np.uint8)
+            prop_boxes = [_pixel_box_padded(p, img_w, img_h, pad=0.02) for p in assigned_props]
+            mask_np = _stamp_boxes(blank, prop_boxes)
+
 
         if mask_np is not None:
+            mask_np = _erase_scene_props_from_person(
+                mask_np, img_rgb, other_regions, ui_regions, region, img_w, img_h,
+            )
+            # Blown-out fingertips often miss SAM. A short dilate keeps the
+            # hands on the person layer so cards composite behind the fingers.
+            kernel = _cv2.getStructuringElement(_cv2.MORPH_ELLIPSE, (5, 5))
+            mask_np = _cv2.dilate(mask_np, kernel, iterations=2)
+            mask_np = _erase_scene_props_from_person(
+                mask_np, img_rgb, other_regions, ui_regions, region, img_w, img_h,
+            )
             mask_clean = (mask_np > 127).astype(_np.uint8) * 255
 
             rgba = img_rgb.convert('RGBA')
@@ -698,27 +838,64 @@ def _wants_pixel_motion(region: dict) -> bool:
 
 
 def _sits_on_plaque(region, plaques):
-    """True if this box is decoration on a bonus card (gift, coins, extra draw)."""
+    """True if this box is decoration on a bonus card (gift, coins on the plaque).
+
+    Coins between the hand and the card's left edge are scene props, not card art.
+    """
     for card in plaques:
-        padded = _inflate_region(card)
-        if (
-            _region_center_in(region, padded)
-            or _region_fraction_inside(region, padded) >= 0.30
-            or _region_hangs_under(region, card)
-        ):
+        padded = _inflate_region(card, pad=0.06)
+        if _region_center_in(region, padded) or _region_fraction_inside(region, card) >= 0.40:
+            rx, _ry, rw, _rh = _region_box(region)
+            cx, _cy, _cw, _ch = _region_box(card)
+            if rx + rw / 2.0 < cx - 0.005:
+                continue
+            return True
+        if _region_hangs_off_plaque(region, card):
             return True
     return False
 
 
-def _merge_effects_into(card, extras):
-    merged = dict(card)
-    effects = list(merged.get('effects') or [])
-    for extra in extras:
-        for key in extra.get('effects') or []:
-            if key not in effects:
-                effects.append(key)
-    merged['effects'] = effects
-    return merged
+def _near_plaque_scene(region, plaques):
+    """Coins/gifts sitting between a hand and a bonus card, or on the card."""
+    if _sits_on_plaque(region, plaques):
+        return True
+    for card in plaques:
+        if _region_fraction_inside(region, _inflate_region(card, pad=0.22)) >= 0.08:
+            return True
+    return False
+
+
+def _erase_scene_props_from_person(
+    mask_np, img_rgb, other_regions, plaques, person_region, img_w, img_h,
+):
+    """Keep gold coins intact: do not let the hand SAM swallow them."""
+    import numpy as np
+
+    if mask_np is None:
+        return mask_np
+    out = mask_np
+    for region in other_regions or []:
+        source = (region.get('source') or '').lower()
+        if source in _PLAQUE_SOURCES:
+            continue
+        if not (_looks_like_prop(region) or source == 'prop'):
+            continue
+        if not _near_plaque_scene(region, plaques):
+            continue
+        if _region_center_in(region, person_region) and not _sits_on_plaque(region, plaques):
+            continue
+        box = _pixel_box_padded(region, img_w, img_h, pad=0.02)
+        piece = segment_box(img_rgb, box)
+        if piece is None:
+            piece = _plaque_from_frame(img_rgb, box)
+        if piece is None:
+            continue
+        out = np.where(piece > 127, 0, out)
+        logger.info(
+            '  Trimmed scene %s off person so coins stay whole',
+            region.get('label') or source,
+        )
+    return out
 
 
 def _wants_plaque_mask(region: dict) -> bool:
@@ -800,12 +977,238 @@ def _or_masks(*masks):
     return result
 
 
-def _usable_silhouette(mask, box, lo=0.28, hi=0.93):
+def _mask_is_selection_rectangle(mask, box):
+    """True when SAM/rembg filled the prompt box, not the rounded card."""
+    if mask is None:
+        return True
+    x1, y1, x2, y2 = [int(value) for value in box]
+    height, width = mask.shape[:2]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(width, x2), min(height, y2)
+    if x2 - x1 < 8 or y2 - y1 < 8:
+        return False
+    fill = _mask_fill_ratio(mask, x1, y1, x2, y2)
+    if fill < 0.88:
+        return False
+    span = max(3, min(8, (x2 - x1) // 12, (y2 - y1) // 12))
+    corners = (
+        mask[y1:y1 + span, x1:x1 + span],
+        mask[y1:y1 + span, x2 - span:x2],
+        mask[y2 - span:y2, x1:x1 + span],
+        mask[y2 - span:y2, x2 - span:x2],
+    )
+    filled_corners = sum(
+        1 for patch in corners
+        if patch.size and float((patch > 16).mean()) > 0.45
+    )
+    return filled_corners >= 3
+
+
+def _usable_silhouette(mask, box, lo=0.22, hi=0.99):
     if mask is None:
         return False
     if (mask > 16).sum() < 80:
         return False
+    if _mask_is_selection_rectangle(mask, box):
+        return False
     return lo <= _mask_fill_ratio(mask, *box) <= hi
+
+
+def _feather_edge_alpha(mask, blur=5):
+    """Solid interior, soft neon bloom on the rim. Binary 0/255 looks harsh."""
+    import cv2
+    import numpy as np
+
+    binary = (mask > 16).astype(np.uint8) * 255
+    if binary.max() == 0 or blur < 1:
+        return binary
+    k = int(blur) * 2 + 1
+    soft = cv2.GaussianBlur(binary, (k, k), max(0.8, blur * 0.5))
+    core = cv2.erode(
+        binary, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+    )
+    return np.maximum(core, soft)
+
+
+def _inset_rounded_rect_mask(shape, box, inset=0.045, radius_frac=0.20):
+    """Last-resort card shape: rounded plaque inside the box, never a sharp square."""
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    height, width = shape[:2]
+    x1, y1, x2, y2 = [int(value) for value in box]
+    bw, bh = max(1, x2 - x1), max(1, y2 - y1)
+    ix = max(3, int(bw * inset))
+    iy = max(3, int(bh * inset))
+    rx1, ry1 = x1 + ix, y1 + iy
+    rx2, ry2 = x2 - ix, y2 - iy
+    if rx2 - rx1 < 8 or ry2 - ry1 < 8:
+        rx1, ry1, rx2, ry2 = x1, y1, x2, y2
+    radius = max(10, int(min(rx2 - rx1, ry2 - ry1) * radius_frac))
+    canvas = Image.new('L', (width, height), 0)
+    ImageDraw.Draw(canvas).rounded_rectangle(
+        (rx1, ry1, rx2 - 1, ry2 - 1), radius=radius, fill=255,
+    )
+    return np.array(canvas)
+
+
+def _sw_corner_is_dirty(mask, box):
+    """Rounded cards have an empty south-west corner. Fingers/coins fill it."""
+    if mask is None:
+        return True
+    x1, y1, x2, y2 = [int(value) for value in box]
+    height, width = mask.shape[:2]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(width, x2), min(height, y2)
+    span_x = max(8, (x2 - x1) // 7)
+    span_y = max(8, (y2 - y1) // 5)
+    corner = mask[max(0, y2 - span_y):y2, x1:min(width, x1 + span_x)]
+    if corner.size == 0:
+        return False
+    return float((corner > 16).mean()) > 0.22
+
+
+def _clip_extras_to_card_right(mask, box):
+    """Gifts on the right stay. Coins on the left of the card do not."""
+    import numpy as np
+
+    if mask is None:
+        return None
+    x1, y1, x2, y2 = [int(value) for value in box]
+    height, width = mask.shape[:2]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(width, x2), min(height, y2)
+    mid = x1 + int((x2 - x1) * 0.42)
+    out = mask.copy()
+    out[y1:y2, x1:mid] = 0
+    if (out > 16).sum() < 40:
+        return None
+    return out
+
+
+def _plaque_from_frame(img_rgb, box):
+    """
+    Trace the neon plaque: only the border ring, then fill what it encloses.
+
+    Interior green type / left vortex used to join the ring, so flood-fill
+    leaked and we fell back to SAM (harsh edges). Restrict neon to a donut
+    around the box, then flood from outside.
+    """
+    import cv2
+    import numpy as np
+
+    rgb = np.asarray(img_rgb.convert('RGB'))
+    height, width = rgb.shape[:2]
+    x1, y1, x2, y2 = [int(value) for value in box]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(width, x2), min(height, y2)
+    bw, bh = max(1, x2 - x1), max(1, y2 - y1)
+    pad = max(8, int(0.05 * min(bw, bh)))
+    ex1, ey1 = max(0, x1 - pad), max(0, y1 - pad)
+    ex2, ey2 = min(width, x2 + pad), min(height, y2 + pad)
+    crop = rgb[ey1:ey2, ex1:ex2]
+    if crop.size == 0:
+        return None
+    hsv = cv2.cvtColor(crop, cv2.COLOR_RGB2HSV)
+    hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    gold = (hue <= 28) & (sat > 70) & (val > 80)
+    green = (hue >= 35) & (hue <= 100) & (sat > 50) & (val > 45)
+    purple = (hue >= 115) & (hue <= 180) & (sat > 28) & (val > 35)
+    neon = ((green | purple) & ~gold).astype(np.uint8) * 255
+    hot = ((val > 200) & (sat < 100)).astype(np.uint8) * 255
+    near = cv2.dilate(neon, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
+    neon = cv2.bitwise_or(neon, cv2.bitwise_and(hot, near))
+
+    crop_h, crop_w = neon.shape[:2]
+    ox1, oy1 = x1 - ex1, y1 - ey1
+    ox2, oy2 = x2 - ex1, y2 - ey1
+    band = max(12, int(0.14 * min(bw, bh)))
+    donut = np.zeros((crop_h, crop_w), dtype=np.uint8)
+    donut[oy1:oy2, ox1:ox2] = 255
+    iy1, iy2 = oy1 + band, oy2 - band
+    ix1, ix2 = ox1 + band, ox2 - band
+    if iy2 > iy1 and ix2 > ix1:
+        donut[iy1:iy2, ix1:ix2] = 0
+    neon = cv2.bitwise_and(neon, donut)
+    neon = cv2.dilate(neon, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+    neon = cv2.morphologyEx(
+        neon, cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13)),
+    )
+    if neon.max() == 0:
+        logger.info('Neon plaque: no border pixels')
+        return None
+    inv = cv2.bitwise_not(neon)
+    flood = inv.copy()
+    ff_mask = np.zeros((crop_h + 2, crop_w + 2), np.uint8)
+    for seed in (
+        (0, 0), (crop_w - 1, 0), (0, crop_h - 1), (crop_w - 1, crop_h - 1),
+        (crop_w // 2, 0), (crop_w // 2, crop_h - 1),
+        (0, crop_h // 2), (crop_w - 1, crop_h // 2),
+    ):
+        sx, sy = seed
+        if flood[sy, sx] > 0:
+            cv2.floodFill(flood, ff_mask, (sx, sy), 0)
+    enclosed = flood
+    plaque = cv2.bitwise_or(neon, enclosed)
+    # A little extra so the outer bloom is inside the cut-out, not chopped.
+    plaque = cv2.dilate(
+        plaque, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+    )
+    full = np.zeros((height, width), dtype=np.uint8)
+    full[ey1:ey2, ex1:ex2] = plaque
+    clipped = np.zeros_like(full)
+    clipped[y1:y2, x1:x2] = full[y1:y2, x1:x2]
+    fill = _mask_fill_ratio(clipped, x1, y1, x2, y2)
+    inner_fill = _mask_fill_ratio(
+        clipped,
+        x1 + int(bw * 0.18), y1 + int(bh * 0.18),
+        x2 - int(bw * 0.18), y2 - int(bh * 0.18),
+    )
+    if fill < 0.28 or fill > 0.93 or inner_fill < 0.62:
+        logger.info(
+            'Neon plaque rejected fill=%.2f inner=%.2f box=%s',
+            fill, inner_fill, [x1, y1, x2, y2],
+        )
+        return None
+    full = clipped
+    if _mask_is_selection_rectangle(full, box):
+        logger.info('Neon plaque rejected: selection rectangle')
+        return None
+    if _sw_corner_is_dirty(full, box):
+        gold_full = _gold_pixels(img_rgb, box)
+        span_x = max(8, bw // 7)
+        span_y = max(8, bh // 5)
+        corner = full[max(0, y2 - span_y):y2, x1:min(width, x1 + span_x)]
+        gold_c = gold_full[max(0, y2 - span_y):y2, x1:min(width, x1 + span_x)]
+        corner[:] = np.where(gold_c > 0, 0, corner)
+        if _sw_corner_is_dirty(full, box):
+            logger.info('Neon plaque rejected: dirty SW corner')
+            return None
+    logger.info('Neon plaque OK fill=%.2f inner=%.2f', fill, inner_fill)
+    return full
+
+
+def _or_extra_silhouettes(img_rgb, extra_boxes, *, allow_boxy=False):
+    """Union gift/icon shapes. Never stamp their selection rectangles."""
+    combined = None
+    for box in extra_boxes or []:
+        piece = segment_box(img_rgb, box)
+        if piece is not None:
+            piece = _fill_mask_holes(piece)
+        if piece is None or (not allow_boxy and _mask_is_selection_rectangle(piece, box)):
+            piece = _plaque_from_frame(img_rgb, box)
+        if piece is None:
+            piece = _grabcut_box(img_rgb, box)
+            if piece is not None:
+                piece = _fill_mask_holes(piece)
+        if piece is None:
+            continue
+        if not allow_boxy and _mask_is_selection_rectangle(piece, box):
+            logger.info('Skipping square extra at %s', [int(v) for v in box])
+            continue
+        combined = piece if combined is None else _or_masks(combined, piece)
+    return combined
 
 
 def _sam_union(img_rgb, boxes):
@@ -852,55 +1255,64 @@ def _grabcut_box(image, box_xyxy):
 
 def _resolve_ui_mask(img_rgb, box, *, plaque, extra_boxes=None):
     """
-    Cut a silhouette, never a rounded rectangle of the selection.
-
-    Cards: SAM the plaque + the coin/gift strip, fill the interior so gold
-    coins stay in the card, then rembg / GrabCut if SAM only caught the gift.
+    Cut the card's own shape (rounded neon/gold plaque), never the
+    selection rectangle. Extra gift/icon boxes are unioned as silhouettes,
+    not stamped as squares — those stamps are the grid the user saw.
     """
     x1, y1, x2, y2 = box
     if plaque:
-        height = y2 - y1
-        parts = [box, [x1, y1 + int(height * 0.50), x2, y2]]
-        if extra_boxes:
-            parts.extend(extra_boxes)
-        sam = _sam_union(img_rgb, parts)
-        rembg = _segment_box_rembg(img_rgb, box)
-        grab = _grabcut_box(img_rgb, box)
-        merged = _or_masks(sam, rembg, grab)
-        if merged is not None:
-            merged = _seal_plaque_interior(merged, box)
-            merged = _stamp_boxes(merged, extra_boxes)
-        for candidate in (merged, sam, rembg, grab):
+        extras = _clip_extras_to_card_right(
+            _or_extra_silhouettes(img_rgb, extra_boxes, allow_boxy=True),
+            box,
+        )
+
+        def _accept_plaque(candidate, *, fill_holes=True):
             if candidate is None:
-                continue
-            sealed = _seal_plaque_interior(candidate, box)
-            sealed = _stamp_boxes(sealed, extra_boxes)
-            if _usable_silhouette(sealed, box):
-                logger.info('Using sealed plaque silhouette so card props stay sharp')
-                return sealed
-        if merged is not None and (merged > 16).sum() > 80:
-            return merged
-        return None
+                return None
+            filled = _fill_mask_holes(candidate) if fill_holes else candidate
+            if _mask_is_selection_rectangle(filled, box):
+                return None
+            if (filled > 16).sum() < 80:
+                return None
+            return filled
 
-    sam = segment_box(img_rgb, box)
-    if sam is not None:
-        sam = _fill_mask_holes(sam)
-        fill = _mask_fill_ratio(sam, x1, y1, x2, y2)
-        if 0.08 <= fill <= 0.93:
-            return sam
-        logger.info('SAM fill=%.2f is not a usable prop silhouette', fill)
+        # Neon ring first — BiRefNet returns a blob and loses the notched frame.
+        frame = _accept_plaque(_plaque_from_frame(img_rgb, box), fill_holes=False)
+        if frame is not None:
+            logger.info('Using neon plaque frame')
+            return _or_masks(frame, extras)
+        rembg = _accept_plaque(
+            _segment_box_rembg(img_rgb, box, variant='toonout', pad_frac=0.10)
+        )
+        if rembg is not None and not _sw_corner_is_dirty(rembg, box):
+            logger.info('Using plaque silhouette')
+            return _or_masks(rembg, extras)
+        # SAM follows the green vortex and squares the notched frame.
+        logger.info('Using inset rounded card')
+        rounded = _inset_rounded_rect_mask(
+            (img_rgb.size[1], img_rgb.size[0]), box,
+        )
+        return _or_masks(rounded, extras)
 
-    rembg = _segment_box_rembg(img_rgb, box)
-    if rembg is not None:
-        rembg = _fill_mask_holes(rembg)
-        fill = _mask_fill_ratio(rembg, x1, y1, x2, y2)
-        if 0.08 <= fill <= 0.93:
-            return rembg
-
-    grab = _grabcut_box(img_rgb, box)
-    if grab is not None:
-        logger.info('Using GrabCut for small prop box')
-        return grab
+    rembg = _segment_box_rembg(img_rgb, box, variant='toonout', pad_frac=0.08)
+    candidates = [rembg]
+    if rembg is None:
+        candidates.append(_segment_box_grounded_sam(
+            img_rgb, box,
+            prompt='object, item, gift, icon, coin, product',
+            negative='person, hand, finger, face, hair, background',
+        ))
+    candidates.extend([segment_box(img_rgb, box), _grabcut_box(img_rgb, box)])
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        filled = _fill_mask_holes(candidate)
+        fill = _mask_fill_ratio(filled, x1, y1, x2, y2)
+        if fill < 0.08 or fill > 0.93:
+            continue
+        if _mask_is_selection_rectangle(filled, box):
+            continue
+        return filled
     return None
 
 
@@ -999,10 +1411,91 @@ def _carve_person_from_ui_mask(card_mask, person_mask):
     if person_mask.shape[:2] != card_mask.shape[:2] or person_mask.max() == 0:
         return card_mask
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    keep_out = cv2.dilate((person_mask > 16).astype(np.uint8) * 255, kernel, iterations=2)
+    keep_out = cv2.dilate((person_mask > 16).astype(np.uint8) * 255, kernel, iterations=1)
     carved = card_mask.copy()
     carved[keep_out > 0] = 0
     return carved
+
+
+def _carve_foreign_props_from_card(
+    card_mask, img_rgb, regions, this_card, extras, img_w, img_h,
+):
+    """Do not let the card cutout slice coins that sit beside it, near the hand."""
+    import numpy as np
+
+    if card_mask is None:
+        return card_mask
+    extra_ids = {id(item) for item in extras or []}
+    out = card_mask
+    for region in regions or []:
+        if region is this_card or id(region) in extra_ids:
+            continue
+        source = (region.get('source') or '').lower()
+        if source in _PLAQUE_SOURCES:
+            continue
+        if not (_looks_like_prop(region) or source == 'prop'):
+            continue
+        if _sits_on_plaque(region, [this_card]):
+            continue
+        box = _pixel_box_padded(region, img_w, img_h, pad=0.02)
+        piece = segment_box(img_rgb, box)
+        if piece is None:
+            piece = _plaque_from_frame(img_rgb, box)
+        if piece is None:
+            continue
+        out = np.where(piece > 127, 0, out)
+        logger.info(
+            '  Carved neighboring %s out of card so coins stay whole',
+            region.get('label') or source,
+        )
+    return out
+
+
+def _gold_pixels(img_rgb, box):
+    """Gold coin pixels inside a box (HSV)."""
+    import cv2
+    import numpy as np
+
+    rgb = np.asarray(img_rgb.convert('RGB'))
+    height, width = rgb.shape[:2]
+    x1, y1, x2, y2 = [int(v) for v in box]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(width, x2), min(height, y2)
+    full = np.zeros((height, width), dtype=np.uint8)
+    if x2 <= x1 or y2 <= y1:
+        return full
+    hsv = cv2.cvtColor(rgb[y1:y2, x1:x2], cv2.COLOR_RGB2HSV)
+    gold = cv2.inRange(hsv, (8, 70, 90), (42, 255, 255))
+    gold = cv2.morphologyEx(
+        gold, cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+    )
+    full[y1:y2, x1:x2] = gold
+    return full
+
+
+def _carve_left_clutter_from_card(card_mask, img_rgb, box, person_mask):
+    """Remove only gold blobs in the south-west corner — never a vertical strip."""
+    import numpy as np
+
+    if card_mask is None:
+        return card_mask
+    x1, y1, x2, y2 = [int(v) for v in box]
+    height, width = card_mask.shape[:2]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(width, x2), min(height, y2)
+    if x2 - x1 < 12 or y2 - y1 < 12:
+        return card_mask
+    out = card_mask.copy()
+    corner_w = max(10, int((x2 - x1) * 0.18))
+    corner_h = max(10, int((y2 - y1) * 0.22))
+    gold = _gold_pixels(img_rgb, box)
+    out[y2 - corner_h:y2, x1:x1 + corner_w] = np.where(
+        gold[y2 - corner_h:y2, x1:x1 + corner_w] > 0,
+        0,
+        out[y2 - corner_h:y2, x1:x1 + corner_w],
+    )
+    return out
 
 
 def _bbox_in_front_of_people(bbox, person_bboxes):
@@ -1038,7 +1531,7 @@ def _card_sits_in_front(card_mask, person_mask):
         return False
     ys = np.where(person_bin)[0]
     oys = np.where(overlap)[0]
-    y_mid = float(ys.min()) + 0.55 * float(ys.max() - ys.min())
+    y_mid = float(ys.min()) + 0.72 * float(ys.max() - ys.min())
     return float(oys.mean()) > y_mid
 
 
@@ -1105,10 +1598,10 @@ def knock_card_glow_off_characters(characters, cutout_mask, img_w, img_h, cutout
 
 def segment_ui_cutouts(image, regions: list, tmp_dir: str, person_mask=None):
     """
-    SAM (or Replicate rembg) silhouette for ornate cards / buttons / titles.
+    Replicate silhouette for cards, buttons, titles, and standalone props.
 
-    Person SAM is not modified. If a person_mask is given, arm overlap is
-    carved out of the card so it does not zoom with the plaque.
+    Does not change the person layer. person_mask is only used to keep
+    overlapping pixels on the character, not to re-cut the person.
     """
     import os
     import numpy as _np
@@ -1135,8 +1628,9 @@ def segment_ui_cutouts(image, regions: list, tmp_dir: str, person_mask=None):
         extras = [
             extra for extra in regions
             if extra is not region
-            and (extra.get('source') or '').lower() != 'prop'
+            and (extra.get('source') or '').lower() not in _PLAQUE_SOURCES
             and _sits_on_plaque(extra, [region])
+            and not _region_hits_person_mask(extra, person_mask, img_w, img_h, thresh=0.18)
         ]
         if extras:
             logger.info(
@@ -1144,9 +1638,8 @@ def segment_ui_cutouts(image, regions: list, tmp_dir: str, person_mask=None):
                 len(extras), source,
             )
             absorbed_ids.update(id(extra) for extra in extras)
-            merged = _merge_effects_into(region, extras)
-            extra_boxes_for[id(merged)] = extras
-            ordered.append(merged)
+            extra_boxes_for[id(region)] = extras
+            ordered.append(region)
         else:
             ordered.append(region)
     for region in regions:
@@ -1164,7 +1657,6 @@ def segment_ui_cutouts(image, regions: list, tmp_dir: str, person_mask=None):
         if (
             _sits_on_plaque(region, plaque_regions)
             and source not in _PLAQUE_SOURCES
-            and source != 'prop'
         ):
             continue
         if source not in _UI_CUTOUT_SOURCES or not _wants_pixel_motion(region):
@@ -1174,13 +1666,18 @@ def segment_ui_cutouts(image, regions: list, tmp_dir: str, person_mask=None):
             leftover.append(region)
             continue
 
-        pad = 0.02 if source in _PLAQUE_SOURCES else 0.03
+        # pad=0.04 captures a slim fringe around the card edge; the outer
+        # neon glow is replicated as a CSS drop-shadow in Remotion so it
+        # moves with the card without bleeding into adjacent regions.
+        pad = 0.04 if source in _PLAQUE_SOURCES else 0.03
         x1, y1, x2, y2 = _pixel_box_padded(region, img_w, img_h, pad=pad)
         plaque = _wants_plaque_mask(region)
         extra_px = None
         for extra in extra_boxes_for.get(id(region), []):
             extra_px = extra_px or []
             extra_px.append(_pixel_box_padded(extra, img_w, img_h, pad=0.02))
+        # Keep the plaque box as the neon frame. Expanding it to gifts first
+        # convex-hulls card + coins into a blob (the messy 4 STREAK cutout).
         mask_np = _resolve_ui_mask(
             img_rgb, [x1, y1, x2, y2], plaque=plaque, extra_boxes=extra_px,
         )
@@ -1189,23 +1686,35 @@ def segment_ui_cutouts(image, regions: list, tmp_dir: str, person_mask=None):
             continue
 
         sits_front = plaque and _card_sits_in_front(mask_np, person_mask)
-        if plaque and not sits_front:
+        if plaque:
             mask_np = _carve_person_from_ui_mask(mask_np, person_mask)
+            mask_np = _carve_foreign_props_from_card(
+                mask_np, img_rgb, regions, region,
+                extra_boxes_for.get(id(region), []),
+                img_w, img_h,
+            )
+            mask_np = _carve_left_clutter_from_card(
+                mask_np, img_rgb, [x1, y1, x2, y2], person_mask,
+            )
         if (mask_np > 16).sum() < 50:
             leftover.append(region)
             continue
 
-        # Binary interior. Eroding / blurring let inpaint show through
-        # coins and gifts, which is what made card props look melted.
+        # Binary interior. Do not seal after carving — hulling filled the
+        # finger and coin holes back in on SHARE & WIN / 4 STREAK.
         mask_bin = (mask_np > 16).astype(_np.uint8) * 255
-        if extra_px:
+        if extra_px and not plaque:
             mask_bin = _stamp_boxes(mask_bin, extra_px)
-        if plaque:
-            mask_bin = _seal_plaque_interior(mask_bin, [x1, y1, x2, y2])
-        mask_clean = mask_bin
+        if plaque and _mask_is_selection_rectangle(mask_bin, [x1, y1, x2, y2]):
+            logger.info('Dropping square card mask; leftover will use rounded crop')
+            leftover.append(region)
+            continue
+        # blur=8 → ~17px feather, enough to soften the card silhouette edge
+        # without bleeding far into neighbouring regions.
+        mask_alpha = _feather_edge_alpha(mask_bin, blur=8) if plaque else mask_bin
         rgba = img_rgb.convert('RGBA')
         r, g, b, _a = rgba.split()
-        alpha_ch = _Image.fromarray(mask_clean, mode='L')
+        alpha_ch = _Image.fromarray(mask_alpha, mode='L')
         rgba_masked = _Image.merge('RGBA', (r, g, b, alpha_ch))
         actual_bbox = alpha_ch.getbbox()
         if not actual_bbox:
@@ -1213,7 +1722,13 @@ def segment_ui_cutouts(image, regions: list, tmp_dir: str, person_mask=None):
             continue
         crop = rgba_masked.crop(actual_bbox)
         cx1, cy1, cx2, cy2 = actual_bbox
-        combined = _np.maximum(combined, mask_clean)
+        hole = mask_bin
+        if plaque:
+            hole = _cv2.dilate(
+                mask_bin,
+                _cv2.getStructuringElement(_cv2.MORPH_ELLIPSE, (7, 7)),
+            )
+        combined = _np.maximum(combined, hole)
 
         mask_path = os.path.join(tmp_dir, f'ui_{cut_idx}.png')
         crop.save(mask_path, format='PNG')
@@ -1238,14 +1753,9 @@ def segment_ui_cutouts(image, regions: list, tmp_dir: str, person_mask=None):
     leftover = [
         r for r in leftover
         if not _region_hits_person_mask(r, person_mask, img_w, img_h)
-        and (
-            (r.get('source') or '').lower() == 'prop'
-            or (
-                not _sits_on_plaque(r, plaque_regions)
-                and not _is_card_art_prop(r, plaque_regions)
-                and not _covered_by_cutouts(r, layers)
-            )
-        )
+        and not _sits_on_plaque(r, plaque_regions)
+        and not _is_card_art_prop(r, plaque_regions)
+        and not _covered_by_cutouts(r, layers)
     ]
 
     return layers, _Image.fromarray(combined, mode='L'), leftover

@@ -132,11 +132,29 @@ function ShineBand({ region, canvasW, canvasH }) {
   const frame = useCurrentFrame();
   const { durationInFrames } = useVideoConfig();
   const { left, top, width, height, radius } = boxPixels(region, canvasW, canvasH);
-  const sweep = interpolate(frame, [0, Math.max(durationInFrames, 1)], [-25, 125], {
-    easing: Easing.inOut(Easing.quad),
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
+  const dur = Math.max(durationInFrames, 1);
+
+  // Phase 0-70% of clip: slow cubic ease-in sweep from -20 → 110
+  // Phase 70-100%: hold at 110 (band has exited, nothing visible)
+  const sweepFrameEnd = Math.floor(dur * 0.70);
+  const sweep = interpolate(
+    frame,
+    [0, sweepFrameEnd],
+    [-20, 110],
+    {
+      easing: Easing.in(Easing.cubic),
+      extrapolateLeft: "clamp",
+      extrapolateRight: "clamp",
+    }
+  );
+
+  // Fade the whole band out in the last 15% of the clip so the loop is clean
+  const bandOpacity = interpolate(
+    frame,
+    [Math.floor(dur * 0.60), Math.floor(dur * 0.75)],
+    [1, 0],
+    { extrapolateLeft: "clamp", extrapolateRight: "clamp" }
+  );
 
   return (
     <div
@@ -150,13 +168,15 @@ function ShineBand({ region, canvasW, canvasH }) {
         borderRadius: radius,
         pointerEvents: "none",
         mixBlendMode: "screen",
+        opacity: bandOpacity,
       }}
     >
       <div
         style={{
           position: "absolute",
           inset: 0,
-          background: `linear-gradient(115deg, transparent 0%, transparent ${sweep}%, rgba(255, 236, 180, 0) ${sweep}%, rgba(255, 236, 180, 0.72) ${sweep + 8}%, rgba(255, 210, 90, 0) ${sweep + 18}%, transparent 100%)`,
+          // Narrower band (10pp wide) and softer peak (0.55 vs 0.72)
+          background: `linear-gradient(115deg, transparent 0%, transparent ${sweep}%, rgba(255, 214, 110, 0) ${sweep}%, rgba(255, 214, 110, 0.42) ${sweep + 5}%, rgba(255, 186, 70, 0.08) ${sweep + 10}%, transparent 100%)`,
         }}
       />
     </div>
@@ -273,14 +293,29 @@ function OverlayFX({ region, canvasW, canvasH, dur, wave, faceWash = true }) {
   );
 }
 
-function UiLayer({ region, posterSrc, canvasW, canvasH, frame, dur, wave }) {
+function UiLayer({ region, posterSrc, originalSrc, canvasW, canvasH, frame, dur, wave }) {
   const effects = region.effects || [];
-  const motion = wantsPixelMotion(effects);
-  const effectStyle = motion ? computeEffectStyle(effects, frame, dur) : {};
+  const src = (region.source || "").toLowerCase();
+  // card / button / title regions already have a CutoutLayer that moves the
+  // whole cut-out PNG as one unit. Running pixel-motion here too causes the
+  // poster crop to scale *inside* the static frame — "content moving in box".
+  const isPlaqueRegion = src === "card" || src === "button" || src === "title";
+
+  // For OCR text: we use the original (pre-inpaint) image for the zoom crop
+  // so we see real pixels rather than the white inpainted background.
+  const isOcr = src === "ocr";
+  const motion = !isPlaqueRegion && !isOcr && wantsPixelMotion(effects);
+  const ocrMotion = isOcr && wantsPixelMotion(effects);
+  const effectStyle = (motion || ocrMotion) ? computeEffectStyle(effects, frame, dur) : {};
   const { left, top, width, height, radius } = boxPixels(region, canvasW, canvasH);
+  // Which image to use as the zoom crop source:
+  // - non-OCR regions: posterSrc (inpainted background, cards already removed)
+  // - OCR regions: originalSrc (real image, cards still present behind text)
+  const cropSrc = isOcr ? (originalSrc || posterSrc) : posterSrc;
 
   return (
     <>
+      {/* Non-OCR regions: poster-crop inside a zooming clip div */}
       {motion ? (
         <div
           style={{
@@ -297,7 +332,7 @@ function UiLayer({ region, posterSrc, canvasW, canvasH, frame, dur, wave }) {
           }}
         >
           <Img
-            src={posterSrc}
+            src={cropSrc}
             style={{
               position: "absolute",
               left: -left,
@@ -309,10 +344,56 @@ function UiLayer({ region, posterSrc, canvasW, canvasH, frame, dur, wave }) {
           />
         </div>
       ) : null}
-      <OverlayFX region={region} canvasW={canvasW} canvasH={canvasH} dur={dur} wave={wave} />
+
+      {/* plaque regions: shine/glow overlays are handled by CutoutLayer */}
+      {!isPlaqueRegion && !isOcr ? (
+        <OverlayFX region={region} canvasW={canvasW} canvasH={canvasH} dur={dur} wave={wave} />
+      ) : null}
+
+      {/* OCR regions: zoom uses the original (pre-inpaint) image crop so
+          text pixels show through, not the white inpainted background. */}
+      {isOcr ? (
+        <div
+          style={{
+            position: "absolute",
+            left,
+            top,
+            width,
+            height,
+            overflow: "hidden",
+            borderRadius: radius,
+            pointerEvents: "none",
+            transformOrigin: "center center",
+            ...(ocrMotion ? effectStyle : {}),
+          }}
+        >
+          {ocrMotion ? (
+            <Img
+              src={cropSrc}
+              style={{
+                position: "absolute",
+                left: -left,
+                top: -top,
+                width: canvasW,
+                height: canvasH,
+                objectFit: "fill",
+              }}
+            />
+          ) : null}
+          <OverlayFX
+            region={{ ...region, x: 0, y: 0, width: 1, height: 1 }}
+            canvasW={width}
+            canvasH={height}
+            dur={dur}
+            wave={wave}
+          />
+        </div>
+      ) : null}
     </>
   );
 }
+
+
 
 function hexToGlow(color, alpha) {
   const raw = String(color || "#ffecb4").replace("#", "");
@@ -416,11 +497,21 @@ function CutoutLayer({ cutout, canvasW, canvasH, frame, dur, wave }) {
   const motion = wantsPixelMotion(effects);
   const color = cutout.color || "#ffecb4";
   const effectStyle = motion ? computeEffectStyle(effects, frame, dur, color) : {};
-  const { filter: _ignoreFilter, opacity: _ignoreOpacity, ...motionStyle } = effectStyle;
+  const {
+    filter: shineFilter,
+    opacity: _ignoreOpacity,
+    transformOrigin: _ignoreOrigin,
+    ...motionStyle
+  } = effectStyle;
   const left = cutout.bbox.x * canvasW;
   const top = cutout.bbox.y * canvasH;
   const width = cutout.bbox.width * canvasW;
   const height = cutout.bbox.height * canvasH;
+  const origin = cutout.origin === "right"
+    ? "88% 50%"
+    : cutout.origin === "left"
+      ? "12% 50%"
+      : "center center";
   const region = {
     ...cutout,
     x: cutout.bbox.x,
@@ -440,19 +531,13 @@ function CutoutLayer({ cutout, canvasW, canvasH, frame, dur, wave }) {
   let shadowColor = color;
   if (hasEffect(effects, "gold_pulse")) shadowColor = "#ffd26e";
   if (hasEffect(effects, "neon_pulse")) shadowColor = color || "#00ffc8";
-  const filterStyle = hasGlow ? `drop-shadow(0px 0px ${spread}px ${shadowColor})` : undefined;
+
+  const glowFilter = hasGlow
+    ? `drop-shadow(0px 0px ${spread}px ${shadowColor})`
+    : undefined;
+  const imgFilter = [glowFilter, shineFilter].filter(Boolean).join(" ") || undefined;
 
   const cutoutSrc = assetSrc(cutout.src);
-  const maskStyle = cutoutSrc
-    ? {
-        WebkitMaskImage: `url(${cutoutSrc})`,
-        maskImage: `url(${cutoutSrc})`,
-        WebkitMaskSize: "100% 100%",
-        maskSize: "100% 100%",
-        WebkitMaskRepeat: "no-repeat",
-        maskRepeat: "no-repeat",
-      }
-    : {};
 
   return (
     <div
@@ -463,8 +548,8 @@ function CutoutLayer({ cutout, canvasW, canvasH, frame, dur, wave }) {
         width,
         height,
         pointerEvents: "none",
-        transformOrigin: "center center",
         ...motionStyle,
+        transformOrigin: origin,
       }}
     >
       <Img
@@ -473,60 +558,65 @@ function CutoutLayer({ cutout, canvasW, canvasH, frame, dur, wave }) {
           width: "100%",
           height: "100%",
           objectFit: "fill",
-          filter: filterStyle,
+          filter: imgFilter,
         }}
       />
-      <div style={{ position: "absolute", inset: 0, ...maskStyle }}>
-        <OverlayFX
-          region={{
-            ...region,
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1,
+      {cutoutSrc ? (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            WebkitMaskImage: `url(${cutoutSrc})`,
+            maskImage: `url(${cutoutSrc})`,
+            WebkitMaskSize: "100% 100%",
+            maskSize: "100% 100%",
+            WebkitMaskRepeat: "no-repeat",
+            maskRepeat: "no-repeat",
+            pointerEvents: "none",
           }}
-          canvasW={width}
-          canvasH={height}
-          dur={dur}
-          wave={wave}
-          faceWash={false}
-        />
-      </div>
+        >
+          <OverlayFX
+            region={{
+              ...region,
+              x: 0,
+              y: 0,
+              width: 1,
+              height: 1,
+            }}
+            canvasW={width}
+            canvasH={height}
+            dur={dur}
+            wave={wave}
+            faceWash={false}
+          />
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function isFrontCutout(item, chars) {
-  if (item && item.front) return true;
-  const box = item && item.bbox;
-  if (!box || !chars || !chars.length) return false;
-  const cy = box.y + box.height / 2;
-  return chars.some((person) => {
-    const p = person.bbox;
-    if (!p) return false;
-    const overlaps =
-      box.x < p.x + p.width &&
-      box.x + box.width > p.x &&
-      box.y < p.y + p.height &&
-      box.y + box.height > p.y;
-    return overlaps && cy > p.y + p.height * 0.52;
-  });
+
+function isFrontCutout(item) {
+  return Boolean(item && item.front);
 }
 
-export const Promo = ({ poster, regions, characters, cutouts }) => {
+export const Promo = ({ poster, originalSrc: originalSrcProp, regions, characters, cutouts }) => {
   const { durationInFrames: dur, width, height } = useVideoConfig();
   const frame = useCurrentFrame();
   const wave = useLoopWave();
   const posterSrc = assetSrc(poster);
+  const originalSrc = assetSrc(originalSrcProp) || posterSrc;
   const allRegions = Array.isArray(regions) ? regions : [];
   const allChars = Array.isArray(characters) ? characters : [];
   const allCutouts = Array.isArray(cutouts) ? cutouts : [];
 
   const people = allRegions.filter(isPersonRegion);
-  const ui = allRegions.filter(isUiRegion);
+  // card / button / title are fully handled by CutoutLayer (effects included).
+  // Keep them out of UiLayer so no effect leaks through as a rectangle.
+  const ui = allRegions.filter((r) => isUiRegion(r) && !isPlaqueCutout(r));
   const plaqueCutouts = allCutouts.filter(isPlaqueCutout);
-  const plaqueBack = plaqueCutouts.filter((item) => !isFrontCutout(item, allChars));
-  const plaqueFront = plaqueCutouts.filter((item) => isFrontCutout(item, allChars));
+  const plaqueBack = plaqueCutouts.filter((item) => !isFrontCutout(item));
+  const plaqueFront = plaqueCutouts.filter((item) => isFrontCutout(item));
   const propCutouts = allCutouts.filter((item) => !isPlaqueCutout(item));
 
   return (
@@ -541,6 +631,7 @@ export const Promo = ({ poster, regions, characters, cutouts }) => {
               key={`ui-${region.key || idx}`}
               region={region}
               posterSrc={posterSrc}
+              originalSrc={originalSrc}
               canvasW={width}
               canvasH={height}
               frame={frame}

@@ -16,6 +16,7 @@ from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
 from ..choices import SOURCE_OCR, SOURCE_YOLO
+from .replicate_util import run as replicate_run
 
 logger = logging.getLogger(__name__)
 
@@ -658,9 +659,9 @@ class ReplicateObjectDetector:
         image_uri = 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode('ascii')
 
         concepts = getattr(settings, 'CHARACTER_CONCEPTS', ['person'])
-        output = replicate.run(
+        output = replicate_run(
             self.model_version,
-            input={
+            {
                 "image": image_uri,
                 "class_names": ",".join(concepts),
                 "iou": 0.5,
@@ -668,6 +669,8 @@ class ReplicateObjectDetector:
                 "return_json": True,
             },
         )
+        if output is None:
+            raise ImproperlyConfigured("Replicate object detection failed (rate limit or API error).")
 
         if hasattr(output, 'read'):
             output = output.read()

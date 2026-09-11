@@ -419,35 +419,8 @@ def group_ui_regions(ocr_detections):
     buttons, rest = _button_row(ocr)
     lines = _words_to_lines(rest) if rest else []
 
-    left_cards, left_ids = _offer_column(lines, min_x=0.0, max_right=0.42)
-    unused = [item for item in lines if id(item) not in left_ids]
-    right_cards, right_ids = _offer_column(unused, min_x=0.55, max_right=0.99)
-    offer_cards = left_cards + right_cards
-
-    def _inside_offer(item):
-        cx, cy = _center_x(item), _center_y(item)
-        return any(
-            card.x <= cx <= card.x + card.width and card.y <= cy <= card.y + card.height
-            for card in offer_cards
-        )
-
-    unused = [item for item in unused if id(item) not in right_ids and not _inside_offer(item)]
-
-    banner, banner_ids = _center_banner(unused)
-    unused = [item for item in unused if id(item) not in banner_ids]
-
-    logo = _logo_title(
-        [item for item in unused if item.y < 0.20],
-        left_cards + right_cards,
-    )
-    logo_text = {item.text_content for item in unused if item.y < 0.20}
-    if logo:
-        unused = [
-            item for item in unused
-            if item.y >= 0.20 or item.text_content not in logo_text
-        ]
-
-    extra = _proximity_cluster(unused) if unused else []
-    extra = [item for item in extra if _center_y(item) < 0.78]
-    regions = buttons + left_cards + right_cards + banner + logo + extra
-    return regions
+    # The user specifically requested individual OCR lines (e.g., "WELCOME DEPOSIT BONUS" 
+    # separate from "69%") rather than having them merged into giant "card" columns.
+    # We still run _button_row to catch the action buttons at the bottom, and _words_to_lines 
+    # to stitch horizontal words together, but we skip the aggressive vertical clustering.
+    return buttons + lines

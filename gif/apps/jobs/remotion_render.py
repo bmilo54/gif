@@ -52,6 +52,7 @@ def render_promo_video(
     characters=None,
     cutouts=None,
     depth_map_path=None,
+    original_path=None,
 ):
     """
     Render the Promo composition with local Remotion (no AWS).
@@ -85,6 +86,16 @@ def render_promo_video(
 
     shutil.copyfile(poster_path, public_dir / 'poster.png')
 
+    # Also copy the original (pre-inpaint) image so OCR regions can zoom
+    # against the real pixels instead of the white inpainted background.
+    original_prop = None
+    if original_path and Path(original_path).exists():
+        shutil.copyfile(original_path, public_dir / 'original.png')
+        original_prop = f'{public_id}/original.png'
+    else:
+        # Fall back to poster if original is not available
+        original_prop = f'{public_id}/poster.png'
+
     characters_payload = []
     for char in (characters or []):
         src_name = char.get('src', '')
@@ -117,6 +128,8 @@ def render_promo_video(
             'color': item.get('color'),
             'source': item.get('source') or 'card',
             'label': item.get('label') or '',
+            'front': bool(item.get('front')),
+            'origin': item.get('origin') or 'center',
         })
 
     # Depth map
@@ -128,6 +141,7 @@ def render_promo_video(
     # ── Build props JSON ───────────────────────────────────────────────────────
     props = {
         'poster': f'{public_id}/poster.png',
+        'originalSrc': original_prop,
         'depthMap': depth_map_prop,
         'regions': list(regions or []),
         'characters': characters_payload,
