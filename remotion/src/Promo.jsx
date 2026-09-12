@@ -48,6 +48,10 @@ function isPlaqueCutout(item) {
   return src === "card" || src === "button" || src === "title";
 }
 
+function isOcrCutout(item) {
+  return (item.source || "").toLowerCase() === "ocr";
+}
+
 function hasEffect(effects, name) {
   return Array.isArray(effects) && effects.includes(name);
 }
@@ -301,17 +305,14 @@ function UiLayer({ region, posterSrc, originalSrc, canvasW, canvasH, frame, dur,
   // poster crop to scale *inside* the static frame — "content moving in box".
   const isPlaqueRegion = src === "card" || src === "button" || src === "title";
 
-  // For OCR text: we use the original (pre-inpaint) image for the zoom crop
-  // so we see real pixels rather than the white inpainted background.
+  // For OCR text regions: zoom causes bilinear resampling blur on text pixels
+  // in headless Chromium (scale() interpolates sub-pixel → text goes blurry).
+  // The shine sweep alone provides strong visual motion on static text.
+  // So: skip any pixel-motion for OCR; only render OverlayFX (shine/glow).
   const isOcr = src === "ocr";
   const motion = !isPlaqueRegion && !isOcr && wantsPixelMotion(effects);
-  const ocrMotion = isOcr && wantsPixelMotion(effects);
-  const effectStyle = (motion || ocrMotion) ? computeEffectStyle(effects, frame, dur) : {};
+  const effectStyle = motion ? computeEffectStyle(effects, frame, dur) : {};
   const { left, top, width, height, radius } = boxPixels(region, canvasW, canvasH);
-  // Which image to use as the zoom crop source:
-  // - non-OCR regions: posterSrc (inpainted background, cards already removed)
-  // - OCR regions: originalSrc (real image, cards still present behind text)
-  const cropSrc = isOcr ? (originalSrc || posterSrc) : posterSrc;
 
   return (
     <>
@@ -332,7 +333,7 @@ function UiLayer({ region, posterSrc, originalSrc, canvasW, canvasH, frame, dur,
           }}
         >
           <Img
-            src={cropSrc}
+            src={posterSrc}
             style={{
               position: "absolute",
               left: -left,
@@ -345,54 +346,13 @@ function UiLayer({ region, posterSrc, originalSrc, canvasW, canvasH, frame, dur,
         </div>
       ) : null}
 
-      {/* plaque regions: shine/glow overlays are handled by CutoutLayer */}
+      {/* plaque / OCR: shine on a rectangle lights the card, not the letters */}
       {!isPlaqueRegion && !isOcr ? (
         <OverlayFX region={region} canvasW={canvasW} canvasH={canvasH} dur={dur} wave={wave} />
-      ) : null}
-
-      {/* OCR regions: zoom uses the original (pre-inpaint) image crop so
-          text pixels show through, not the white inpainted background. */}
-      {isOcr ? (
-        <div
-          style={{
-            position: "absolute",
-            left,
-            top,
-            width,
-            height,
-            overflow: "hidden",
-            borderRadius: radius,
-            pointerEvents: "none",
-            transformOrigin: "center center",
-            ...(ocrMotion ? effectStyle : {}),
-          }}
-        >
-          {ocrMotion ? (
-            <Img
-              src={cropSrc}
-              style={{
-                position: "absolute",
-                left: -left,
-                top: -top,
-                width: canvasW,
-                height: canvasH,
-                objectFit: "fill",
-              }}
-            />
-          ) : null}
-          <OverlayFX
-            region={{ ...region, x: 0, y: 0, width: 1, height: 1 }}
-            canvasW={width}
-            canvasH={height}
-            dur={dur}
-            wave={wave}
-          />
-        </div>
       ) : null}
     </>
   );
 }
-
 
 
 function hexToGlow(color, alpha) {
@@ -492,21 +452,25 @@ function CharacterLayer({ character, canvasW, canvasH, frame, dur, wave }) {
   );
 }
 
-function CutoutLayer({ cutout, canvasW, canvasH, frame, dur, wave }) {
+function CutoutLayer({ cutout, originalSrc, posterSrc, canvasW, canvasH, frame, dur, wave }) {
   const effects = cutout.effects || [];
-  const motion = wantsPixelMotion(effects);
+  const isOcr = (cutout.source || "").toLowerCase() === "ocr";
+  const wantsMotion = wantsPixelMotion(effects);
+  const posterCropZoom = wantsMotion && !isOcr;
   const color = cutout.color || "#ffecb4";
-  const effectStyle = motion ? computeEffectStyle(effects, frame, dur, color) : {};
+  const effectStyle = wantsMotion ? computeEffectStyle(effects, frame, dur, color) : {};
   const {
-    filter: shineFilter,
+    filter: _shineFilter,
     opacity: _ignoreOpacity,
     transformOrigin: _ignoreOrigin,
-    ...motionStyle
+    transform: transformValue,
+    ...restMotionStyle
   } = effectStyle;
-  const left = cutout.bbox.x * canvasW;
-  const top = cutout.bbox.y * canvasH;
-  const width = cutout.bbox.width * canvasW;
-  const height = cutout.bbox.height * canvasH;
+
+  const left = Math.round(cutout.bbox.x * canvasW);
+  const top = Math.round(cutout.bbox.y * canvasH);
+  const width = Math.round(cutout.bbox.width * canvasW);
+  const height = Math.round(cutout.bbox.height * canvasH);
   const origin = cutout.origin === "right"
     ? "88% 50%"
     : cutout.origin === "left"
@@ -520,6 +484,25 @@ function CutoutLayer({ cutout, canvasW, canvasH, frame, dur, wave }) {
     height: cutout.bbox.height,
     source: cutout.source || "card",
   };
+
+  // Ken Burns zoom via originalSrc crop — NOT by scaling the cutout PNG.
+  // CSS scale() or PNG stretching causes bilinear interpolation → text blur.
+  // Instead: render the original image slightly oversized inside the clip box
+  // so the card region zooms without any pixel resampling of the card pixels.
+  let scaleVal = 1;
+  if (transformValue) {
+    const m = String(transformValue).match(/scale\(([\d.]+)\)/);
+    if (m) scaleVal = parseFloat(m[1]);
+  }
+  let letterTransform = transformValue;
+  if (isOcr && scaleVal > 1) {
+    letterTransform = `scale(${1 + (scaleVal - 1) * 3})`;
+  }
+  // originalSrc image covers the full canvas; offset so card region fills box
+  const zoomedCanvasW = canvasW * scaleVal;
+  const zoomedCanvasH = canvasH * scaleVal;
+  const imgLeft = -(left * scaleVal) - (zoomedCanvasW - canvasW) / 2;
+  const imgTop  = -(top  * scaleVal) - (zoomedCanvasH - canvasH) / 2;
 
   const hasGlow =
     hasEffect(effects, "glow") ||
@@ -535,9 +518,11 @@ function CutoutLayer({ cutout, canvasW, canvasH, frame, dur, wave }) {
   const glowFilter = hasGlow
     ? `drop-shadow(0px 0px ${spread}px ${shadowColor})`
     : undefined;
-  const imgFilter = [glowFilter, shineFilter].filter(Boolean).join(" ") || undefined;
 
   const cutoutSrc = assetSrc(cutout.src);
+  // Use original image for zoom crop so card text stays pixel-sharp.
+  // Fall back to posterSrc if originalSrc is unavailable.
+  const cropSrc = originalSrc || posterSrc;
 
   return (
     <div
@@ -548,19 +533,38 @@ function CutoutLayer({ cutout, canvasW, canvasH, frame, dur, wave }) {
         width,
         height,
         pointerEvents: "none",
-        ...motionStyle,
+        overflow: isOcr ? "visible" : "hidden",
+        filter: glowFilter,
+        ...restMotionStyle,
         transformOrigin: origin,
+        ...(isOcr && letterTransform ? { transform: letterTransform } : {}),
       }}
     >
-      <Img
-        src={cutoutSrc}
-        style={{
-          width: "100%",
-          height: "100%",
-          objectFit: "fill",
-          filter: imgFilter,
-        }}
-      />
+      {posterCropZoom && cropSrc ? (
+        <Img
+          src={cropSrc}
+          style={{
+            position: "absolute",
+            left: imgLeft,
+            top: imgTop,
+            width: zoomedCanvasW,
+            height: zoomedCanvasH,
+            objectFit: "fill",
+          }}
+        />
+      ) : (
+        <Img
+          src={cutoutSrc}
+          style={{
+            position: "absolute",
+            inset: 0,
+            width: "100%",
+            height: "100%",
+            objectFit: "fill",
+          }}
+        />
+      )}
+      {/* Shine / overlay — clipped to card silhouette via CSS mask */}
       {cutoutSrc ? (
         <div
           style={{
@@ -576,13 +580,7 @@ function CutoutLayer({ cutout, canvasW, canvasH, frame, dur, wave }) {
           }}
         >
           <OverlayFX
-            region={{
-              ...region,
-              x: 0,
-              y: 0,
-              width: 1,
-              height: 1,
-            }}
+            region={{ ...region, x: 0, y: 0, width: 1, height: 1 }}
             canvasW={width}
             canvasH={height}
             dur={dur}
@@ -615,9 +613,12 @@ export const Promo = ({ poster, originalSrc: originalSrcProp, regions, character
   // Keep them out of UiLayer so no effect leaks through as a rectangle.
   const ui = allRegions.filter((r) => isUiRegion(r) && !isPlaqueCutout(r));
   const plaqueCutouts = allCutouts.filter(isPlaqueCutout);
+  const textCutouts = allCutouts.filter(isOcrCutout);
   const plaqueBack = plaqueCutouts.filter((item) => !isFrontCutout(item));
   const plaqueFront = plaqueCutouts.filter((item) => isFrontCutout(item));
-  const propCutouts = allCutouts.filter((item) => !isPlaqueCutout(item));
+  const textBack = textCutouts.filter((item) => !isFrontCutout(item));
+  const textFront = textCutouts.filter(isFrontCutout);
+  const propCutouts = allCutouts.filter((item) => !isPlaqueCutout(item) && !isOcrCutout(item));
 
   return (
     <AbsoluteFill style={{ background: "#000", overflow: "hidden" }}>
@@ -645,6 +646,22 @@ export const Promo = ({ poster, originalSrc: originalSrcProp, regions, character
         <CutoutLayer
           key={`cutout-${item.index}`}
           cutout={item}
+          originalSrc={originalSrc}
+          posterSrc={posterSrc}
+          canvasW={width}
+          canvasH={height}
+          frame={frame}
+          dur={dur}
+          wave={wave}
+        />
+      ))}
+
+      {textBack.map((item) => (
+        <CutoutLayer
+          key={`text-${item.index}`}
+          cutout={item}
+          originalSrc={originalSrc}
+          posterSrc={posterSrc}
           canvasW={width}
           canvasH={height}
           frame={frame}
@@ -680,6 +697,22 @@ export const Promo = ({ poster, originalSrc: originalSrcProp, regions, character
         <CutoutLayer
           key={`cutout-front-${item.index}`}
           cutout={item}
+          originalSrc={originalSrc}
+          posterSrc={posterSrc}
+          canvasW={width}
+          canvasH={height}
+          frame={frame}
+          dur={dur}
+          wave={wave}
+        />
+      ))}
+
+      {textFront.map((item) => (
+        <CutoutLayer
+          key={`text-front-${item.index}`}
+          cutout={item}
+          originalSrc={originalSrc}
+          posterSrc={posterSrc}
           canvasW={width}
           canvasH={height}
           frame={frame}

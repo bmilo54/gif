@@ -8,6 +8,7 @@ from django.core.files.base import ContentFile
 
 from apps.projects.services.preprocessing import load_preprocessed_image
 from apps.projects.services.segmentation import (
+    fill_ocr_holes_with_local_color,
     inpaint_masked,
     knock_card_glow_off_characters,
     overlaps_character,
@@ -58,8 +59,24 @@ def _regions_payload(detections):
     return payload
 
 
-def _cutout_origin(bbox, characters):
+def _cutout_origin(bbox, characters, *, source='card', siblings=None):
     """Zoom away from the person so the card does not grow over the fingers."""
+    src = (source or 'card').lower()
+    if src == 'ocr':
+        cx = float(bbox.get('x') or 0) + float(bbox.get('width') or 0) * 0.5
+        cy = float(bbox.get('y') or 0) + float(bbox.get('height') or 0) * 0.5
+        for other in siblings or []:
+            other_src = ((getattr(other, 'source_region', None) or {}).get('source') or '').lower()
+            if other_src not in ('card', 'button', 'title'):
+                continue
+            box = getattr(other, 'bbox_norm', None) or {}
+            ox = float(box.get('x') or 0)
+            oy = float(box.get('y') or 0)
+            ow = float(box.get('width') or 0)
+            oh = float(box.get('height') or 0)
+            if ox <= cx <= ox + ow and oy <= cy <= oy + oh:
+                return _cutout_origin(box, characters, source='card')
+        return 'center'
     if not bbox or not characters:
         return 'center'
     left = float(bbox.get('x') or 0)
@@ -181,7 +198,8 @@ def generate_gif(job):
                 protect = protect_person_pixels(
                     person_mask, characters, image.width, image.height,
                 )
-                background = inpaint_masked(image, cutout_mask, protect_mask=protect)
+                background = fill_ocr_holes_with_local_color(image, cutouts)
+                background = inpaint_masked(background, cutout_mask, protect_mask=protect)
                 logger.info('Segmented %d UI cut-out(s) for job %s', len(cutouts), job.pk)
             else:
                 background = image.convert('RGB')
@@ -211,7 +229,11 @@ def generate_gif(job):
                     'source': (c.source_region.get('source') or 'card').lower(),
                     'label': c.source_region.get('label') or '',
                     'front': bool(c.source_region.get('front')),
-                    'origin': _cutout_origin(c.bbox_norm, characters),
+                    'origin': _cutout_origin(
+                        c.bbox_norm, characters,
+                        source=(c.source_region.get('source') or 'card').lower(),
+                        siblings=cutouts,
+                    ),
                 }
                 for c in cutouts
             ]
